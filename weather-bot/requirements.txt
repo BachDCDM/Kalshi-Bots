@@ -2,5 +2,6 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 schedule>=1.2.0
 pytz>=2024.1
-kalshi_python_sync>=3.10.0
+kalshi_python_sync>=3.2.0; python_version < "3.13"
+kalshi_python_sync>=3.10.0; python_version >= "3.13"
 certifi>=2024.0.0

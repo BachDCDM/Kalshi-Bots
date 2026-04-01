@@ -33,7 +33,21 @@ cd kalshi-trading
 
 ## 3. Python venv and dependencies
 
+Ubuntu 24.04 ships **Python 3.12**. Newer `kalshi_python_sync` releases require **Python 3.13+**; this repo’s `requirements.txt` uses version markers so **3.12 installs a compatible older SDK** and **3.13+ installs the current one**.
+
+Optional — match your Mac’s Python **3.13** and latest Kalshi SDK:
+
 ```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install -y python3.13 python3.13-venv
+cd ~/kalshi-trading && rm -rf .venv && python3.13 -m venv .venv
+```
+
+Create the venv (default `python3` is fine if you skipped 3.13):
+
+```bash
+cd ~/kalshi-trading
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
