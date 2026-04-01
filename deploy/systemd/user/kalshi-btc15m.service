@@ -1,0 +1,20 @@
+# Install: cp to ~/.config/systemd/user/ then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kalshi-btc15m.service
+# Replace %h/kalshi-trading with your clone path (no spaces recommended).
+
+[Unit]
+Description=Kalshi BTC 15m bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kalshi-trading
+EnvironmentFile=-%h/kalshi-trading/.env
+ExecStart=%h/kalshi-trading/.venv/bin/python %h/kalshi-trading/btc15m_bot.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

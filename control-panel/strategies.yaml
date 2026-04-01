@@ -1,0 +1,23 @@
+# Map UI strategies to systemd user units. Clone repo to a path WITHOUT spaces (e.g. ~/kalshi-trading).
+# Install units under ~/.config/systemd/user/ then: systemctl --user daemon-reload
+
+strategies:
+  - id: btc15m
+    title: "BTC 15m bot"
+    systemd_unit: kalshi-btc15m.service
+    data:
+      type: journal
+      lines: 300
+
+  - id: weather
+    title: "Weather bot"
+    systemd_unit: kalshi-weather-bot.service
+    data:
+      type: sqlite
+      path: weather-bot/db/trades.db
+      lines: 150
+      tables:
+        - forecasts
+        - signals
+        - trades
+        - errors

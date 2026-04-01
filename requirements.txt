@@ -1,23 +1,3 @@
-# HTTP and WebSocket clients
-httpx>=0.25.0
-websockets>=12.0
-cryptography>=41.0.0
-
-# Environment and configuration
+kalshi_python_sync>=3.10.0
 python-dotenv>=1.0.0
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-
-# Numerical computation
-numpy>=1.26.0
-
-# Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-pytest-mock>=3.12.0
-
-# Logging
-structlog>=23.2.0
-
-# Type checking (dev)
-mypy>=1.7.0
+certifi>=2024.0.0

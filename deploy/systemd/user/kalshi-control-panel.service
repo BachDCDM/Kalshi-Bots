@@ -1,0 +1,17 @@
+# Dashboard on http://127.0.0.1:8080 — use: ssh -L 8080:127.0.0.1:8080 you@vps
+
+[Unit]
+Description=Kalshi strategy control panel (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kalshi-trading
+Environment=KALSHI_TRADING_ROOT=%h/kalshi-trading
+Environment=STRATEGIES_CONFIG=%h/kalshi-trading/control-panel/strategies.yaml
+ExecStart=%h/kalshi-trading/.venv/bin/python -m uvicorn app:app --app-dir %h/kalshi-trading/control-panel --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

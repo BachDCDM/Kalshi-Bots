@@ -1,5 +1,6 @@
-# Environment variables (contains API credentials)
+# Environment variables and secrets
 .env
+kalshi.pem
 
 # Logs
 logs/
@@ -48,7 +49,6 @@ htmlcov/
 *.swp
 *.swo
 *~
-.DS_Store
 
 # Type checking
 .mypy_cache/

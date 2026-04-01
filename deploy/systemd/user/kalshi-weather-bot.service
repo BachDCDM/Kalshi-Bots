@@ -1,0 +1,17 @@
+# WorkingDirectory must be weather-bot/ so config, nws, etc. imports work.
+
+[Unit]
+Description=Kalshi weather arbitrage bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kalshi-trading/weather-bot
+EnvironmentFile=-%h/kalshi-trading/.env
+ExecStart=%h/kalshi-trading/.venv/bin/python %h/kalshi-trading/weather-bot/main.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
