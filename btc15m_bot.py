@@ -145,6 +145,8 @@ class Session:
     exit_handled: bool = False
     post_entry_cleanup_done: bool = False
     min_yes_mid_cents_first5: Optional[int] = None
+    cached_yes_fills: float = 0.0
+    cached_no_fills: float = 0.0
 
     def cid_yes(self) -> str:
         return f"b15m-{self.session_id}-y"
@@ -319,8 +321,8 @@ def _log_btc_session_row(
 ) -> None:
     _init_trade_db()
     ended = _utc_now()
-    yes_f = 0.0
-    no_f = 0.0
+    yes_f = session.cached_yes_fills
+    no_f = session.cached_no_fills
     if session.yes_order_id:
         try:
             yes_f = _fp(
@@ -333,7 +335,10 @@ def _log_btc_session_row(
                 ).fill_count_fp
             )
         except Exception:
-            LOG.debug("Trade log: could not read YES entry order", exc_info=True)
+            LOG.debug(
+                "Trade log: could not re-read YES order; using cached fills=%.1f",
+                session.cached_yes_fills,
+            )
     if session.no_order_id:
         try:
             no_f = _fp(
@@ -346,7 +351,10 @@ def _log_btc_session_row(
                 ).fill_count_fp
             )
         except Exception:
-            LOG.debug("Trade log: could not read NO entry order", exc_info=True)
+            LOG.debug(
+                "Trade log: could not re-read NO order; using cached fills=%.1f",
+                session.cached_no_fills,
+            )
 
     success = _compute_session_success(session, entry_cents, exit_cents, yes_f, no_f)
     hour_utc = ended.astimezone(timezone.utc).hour
@@ -419,7 +427,7 @@ def _find_open_btc15m(client: KalshiClient, series_ticker: str) -> Optional[Any]
     upcoming = [m for m in markets if _parse_ts(m.open_time) > now]
     if upcoming:
         return min(upcoming, key=lambda x: _parse_ts(x.open_time))
-    return markets[0]
+    return None
 
 
 def _log_market_minute_debug(
@@ -491,6 +499,35 @@ def _position_size(client: KalshiClient, ticker: str) -> float:
     return 0.0
 
 
+_ENTRY_ORDER_RETRIES = 3
+_ENTRY_ORDER_RETRY_DELAY = 0.5
+
+
+def _create_order_with_retry(
+    client: KalshiClient,
+    retries: int,
+    delay: float,
+    label: str,
+    **kwargs: Any,
+) -> Any:
+    last_err: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            return client.create_order(**kwargs)
+        except Exception as e:
+            last_err = e
+            LOG.warning(
+                "[TRADE] %s order attempt %d/%d failed: %s",
+                label,
+                attempt + 1,
+                retries,
+                e,
+            )
+            if attempt < retries - 1:
+                time.sleep(delay)
+    raise last_err  # type: ignore[misc]
+
+
 def _place_entry(
     client: KalshiClient,
     session: Session,
@@ -510,7 +547,11 @@ def _place_entry(
         ticker,
     )
     try:
-        yes = client.create_order(
+        yes = _create_order_with_retry(
+            client,
+            _ENTRY_ORDER_RETRIES,
+            _ENTRY_ORDER_RETRY_DELAY,
+            "YES",
             ticker=ticker,
             client_order_id=session.cid_yes(),
             side="yes",
@@ -520,7 +561,17 @@ def _place_entry(
             time_in_force="good_till_canceled",
         )
         session.yes_order_id = yes.order.order_id
-        no = client.create_order(
+    except Exception:
+        LOG.exception("[TRADE] YES entry order failed after %d attempts", _ENTRY_ORDER_RETRIES)
+        session.entries_submitted = False
+        raise
+
+    try:
+        no = _create_order_with_retry(
+            client,
+            _ENTRY_ORDER_RETRIES,
+            _ENTRY_ORDER_RETRY_DELAY,
+            "NO",
             ticker=ticker,
             client_order_id=session.cid_no(),
             side="no",
@@ -531,19 +582,21 @@ def _place_entry(
         )
         session.no_order_id = no.order.order_id
     except Exception:
-        if session.yes_order_id:
-            try:
-                client.cancel_order(order_id=session.yes_order_id)
-                LOG.warning(
-                    "Partial entry: cancelled YES order %s after failure placing NO",
-                    session.yes_order_id,
-                )
-            except Exception as ce:
-                LOG.warning("Partial entry: could not cancel YES %s: %s", session.yes_order_id, ce)
+        LOG.exception(
+            "[TRADE] NO entry order failed after %d attempts; cancelling YES %s",
+            _ENTRY_ORDER_RETRIES,
+            session.yes_order_id,
+        )
+        try:
+            client.cancel_order(order_id=session.yes_order_id)
+            LOG.info("Cancelled YES order %s", session.yes_order_id)
+        except Exception as ce:
+            LOG.warning("Could not cancel YES %s: %s", session.yes_order_id, ce)
         session.yes_order_id = None
         session.no_order_id = None
         session.entries_submitted = False
         raise
+
     LOG.info(
         "[TRADE] Entry orders live | YES order_id=%s | NO order_id=%s",
         session.yes_order_id,
@@ -724,6 +777,8 @@ def _handle_fills(
         return
 
     session.exit_handled = True
+    session.cached_yes_fills = yes_f
+    session.cached_no_fills = no_f
     qty_yes = int(yes_f)
     qty_no = int(no_f)
 
@@ -907,7 +962,10 @@ def run_session(
         time.sleep(poll_seconds)
 
     LOG.info("Market close reached for %s — stopping loop (exit orders left working).", ticker)
-    _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
+    if not session.entries_submitted:
+        LOG.info("No entries were submitted for %s — skipping trade log row.", ticker)
+    else:
+        _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
 
 
 def main() -> None:
