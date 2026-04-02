@@ -41,7 +41,7 @@ from kalshi import (
     place_order,
 )
 from nws import get_grid_point, get_projected_high, has_severe_weather_blackout
-from signal import check_early_exits, evaluate_trades
+from edge_model import check_early_exits, evaluate_trades
 
 load_dotenv()
 

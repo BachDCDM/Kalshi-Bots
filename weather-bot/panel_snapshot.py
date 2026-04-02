@@ -23,7 +23,7 @@ from kalshi import (
     parse_bucket_range,
 )
 from nws import get_grid_point, get_projected_high, has_severe_weather_blackout
-from signal import (
+from edge_model import (
     _bucket_sort_key,
     _distance_from_bucket_edges,
     _find_target_bucket,

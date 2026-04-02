@@ -1,4 +1,8 @@
-"""Forecast vs market: bucket probabilities, trade evaluation, early exit."""
+"""Forecast vs market: bucket probabilities, trade evaluation, early exit.
+
+Named edge_model (not signal) so imports never collide with the stdlib ``signal``
+module when this package is loaded inside another process (e.g. FastAPI/uvicorn).
+"""
 
 from __future__ import annotations
 
