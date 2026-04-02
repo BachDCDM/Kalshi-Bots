@@ -3,6 +3,9 @@
 Kalshi BTC 15m market bot: dual-sided entry bids in the first N minutes, then exit limit.
 
 Each completed market session appends a row to ``btc15m_data/trades.db`` (``btc_sessions``).
+The same database has ``btc_order_events``: one row when entry YES/NO orders are placed and
+one per exit order, so you can confirm API placement before the session closes.
+
 ``success`` is 1 only if an exit was placed (``exit_handled``), exactly one entry leg filled,
 and ``exit_cents > entry_cents`` (intended take-profit threshold). It does not wait for exit
 fills or settlement. ``lowest_yes_mid_cents_first5`` is the minimum YES midpoint (¢) sampled
@@ -189,9 +192,75 @@ def _init_trade_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS btc_order_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at_utc TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                market_ticker TEXT,
+                session_id TEXT,
+                order_id TEXT,
+                order_id_secondary TEXT,
+                side TEXT,
+                count INTEGER,
+                price_cents INTEGER
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
+
+
+def _append_btc_order_event(
+    kind: str,
+    *,
+    market_ticker: str,
+    session_id: str,
+    order_id: Optional[str] = None,
+    order_id_secondary: Optional[str] = None,
+    side: Optional[str] = None,
+    count: Optional[int] = None,
+    price_cents: Optional[int] = None,
+) -> None:
+    """Append a row when orders are successfully placed (diagnostics; does not affect success stats)."""
+    _init_trade_db()
+    at = _utc_now().astimezone(timezone.utc).isoformat()
+    try:
+        path = _trade_db_path()
+        conn = sqlite3.connect(path, timeout=10)
+        try:
+            conn.execute(
+                """
+                INSERT INTO btc_order_events (
+                    at_utc, kind, market_ticker, session_id,
+                    order_id, order_id_secondary, side, count, price_cents
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    at,
+                    kind,
+                    market_ticker,
+                    session_id,
+                    order_id,
+                    order_id_secondary,
+                    side,
+                    count,
+                    price_cents,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        LOG.info(
+            "[TRADE_LOG] order_event kind=%s ticker=%s session=%s",
+            kind,
+            market_ticker,
+            session_id,
+        )
+    except Exception:
+        LOG.exception("Trade log: failed to write btc_order_events row")
 
 
 def _yes_mid_cents_from_snap(snap: Any) -> Optional[int]:
@@ -480,6 +549,16 @@ def _place_entry(
         session.yes_order_id,
         session.no_order_id,
     )
+    _append_btc_order_event(
+        "entry_pair",
+        market_ticker=ticker,
+        session_id=session.session_id,
+        order_id=session.yes_order_id,
+        order_id_secondary=session.no_order_id,
+        side=None,
+        count=contracts,
+        price_cents=entry_cents,
+    )
 
 
 def _get_order(
@@ -600,6 +679,16 @@ def _place_sell(
         oid,
         exit_cents,
         count,
+    )
+    _append_btc_order_event(
+        "exit",
+        market_ticker=ticker,
+        session_id=session.session_id,
+        order_id=oid,
+        order_id_secondary=None,
+        side=side,
+        count=count,
+        price_cents=exit_cents,
     )
 
 

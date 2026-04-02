@@ -353,6 +353,8 @@ function loadTable(el, sid, table, limit) {
         h += '<p class="hint">No trade rows yet. Rows are added when the weather bot successfully places an order (<code>log_trade_open</code>) and updated on close.</p>';
       } else if (table === 'btc_sessions') {
         h += '<p class="hint">No completed sessions yet. The BTC bot appends a row when each 15m market reaches <strong>close</strong> (not at entry).</p>';
+      } else if (table === 'btc_order_events') {
+        h += '<p class="hint">No rows yet. After deploy, use the <strong>Order events</strong> tab: a row appears when entry or exit orders are successfully placed (before session close).</p>';
       } else {
         h += '<p class="hint">Table exists but has no rows yet.</p>';
       }
@@ -417,9 +419,11 @@ function buildStrategyPage(s) {
     inner += '<div class="tabs btc-sub" data-btc="' + id + '">';
     inner += '<button type="button" class="on" data-sub="logs">Logs</button>';
     inner += '<button type="button" data-sub="trades">Trade log</button>';
+    inner += '<button type="button" data-sub="order-events">Order events</button>';
     inner += '<button type="button" data-sub="hourly">Success by hour (UTC)</button></div>';
     inner += '<div class="panel on" data-subpanel="logs"><pre data-role="journal">Loading…</pre></div>';
     inner += '<div class="panel" data-subpanel="trades"><div data-role="btc-table"></div></div>';
+    inner += '<div class="panel" data-subpanel="order-events"><div data-role="btc-order-events"></div></div>';
     inner += '<div class="panel" data-subpanel="hourly"><div data-role="btc-hourly"></div></div>';
   } else if (s.has_journal) {
     inner += '<pre data-role="journal">Loading…</pre>';
@@ -455,6 +459,7 @@ function buildStrategyPage(s) {
         panels.forEach((p) => p.classList.toggle('on', p.dataset.subpanel === name));
         if (name === 'logs') loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
         if (name === 'trades') loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', 250);
+        if (name === 'order-events') loadTable(div.querySelector('[data-role="btc-order-events"]'), id, 'btc_order_events', 250);
         if (name === 'hourly') renderBtcHourly(div.querySelector('[data-role="btc-hourly"]'), id);
       };
     });

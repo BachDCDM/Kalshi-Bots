@@ -16,6 +16,7 @@ strategies:
         path: btc15m_data/trades.db
         tables:
           - btc_sessions
+          - btc_order_events
 
   - id: weather
     title: "Weather bot"
