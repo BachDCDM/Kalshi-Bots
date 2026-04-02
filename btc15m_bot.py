@@ -964,6 +964,8 @@ def run_session(
     LOG.info("Market close reached for %s — stopping loop (exit orders left working).", ticker)
     if not session.entries_submitted:
         LOG.info("No entries were submitted for %s — skipping trade log row.", ticker)
+    elif not session.yes_order_id and not session.no_order_id:
+        LOG.info("No entry orders were placed for %s (joined after entry window) — skipping trade log row.", ticker)
     else:
         _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
 
