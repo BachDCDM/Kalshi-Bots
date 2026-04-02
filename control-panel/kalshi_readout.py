@@ -93,8 +93,11 @@ def fetch_balance(client: KalshiClient) -> dict[str, Any]:
 def pnl_weather_cents(db_path: Path) -> int:
     if not db_path.is_file():
         return 0
-    uri = db_path.resolve().as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=15)
+    p = db_path.resolve()
+    try:
+        conn = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error:
+        conn = sqlite3.connect(str(p), timeout=30)
     try:
         cur = conn.execute(
             "SELECT COALESCE(SUM(pnl_cents), 0) FROM trades WHERE pnl_cents IS NOT NULL"
@@ -109,8 +112,11 @@ def pnl_btc_approx_cents(db_path: Path) -> int:
     """Approximate Σ (exit-entry)×contracts for single-leg sessions (YES-mid based)."""
     if not db_path.is_file():
         return 0
-    uri = db_path.resolve().as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=15)
+    p = db_path.resolve()
+    try:
+        conn = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error:
+        conn = sqlite3.connect(str(p), timeout=30)
     try:
         cur = conn.execute(
             """

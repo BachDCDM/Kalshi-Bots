@@ -208,9 +208,14 @@ def _unit_status(unit: str) -> dict[str, Any]:
     return info
 
 
-def _sqlite_uri_readonly(db_path: Path) -> str:
-    """SQLite URI for read-only open (avoids flaky ``file:/abs/path`` on some systems)."""
-    return db_path.resolve().as_uri() + "?mode=ro"
+def _sqlite_connect_read(db_path: Path) -> sqlite3.Connection:
+    """Open DB for reads. Prefer read-only URI; fall back to path (handles locks / quirky builds)."""
+    path = db_path.resolve()
+    uri = path.as_uri() + "?mode=ro"
+    try:
+        return sqlite3.connect(uri, uri=True, timeout=30)
+    except sqlite3.Error:
+        return sqlite3.connect(str(path), timeout=30)
 
 
 def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list[tuple]]:
@@ -221,8 +226,7 @@ def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list
         raise HTTPException(status_code=400, detail="Invalid table name")
     if not db_path.is_file():
         return [], []
-    uri = _sqlite_uri_readonly(db_path)
-    conn = sqlite3.connect(uri, uri=True, timeout=15)
+    conn = _sqlite_connect_read(db_path)
     try:
         cur = conn.execute(f'PRAGMA table_info("{table}")')
         cols = [row[1] for row in cur.fetchall()]
@@ -441,20 +445,75 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     if table not in allowed:
         raise HTTPException(status_code=404, detail="Table not configured")
     lim = min(max(limit, 1), 500)
-    cols, rows = _sqlite_rows(db_path, table, lim)
     try:
         rel_display = str(db_path.resolve().relative_to(_REPO.resolve()))
     except ValueError:
         rel_display = rel
+    meta = {
+        "config_path": rel,
+        "resolved_path": rel_display,
+        "resolved_exists": db_path.is_file(),
+        "repo_root": str(_REPO.resolve()),
+    }
+    try:
+        cols, rows = _sqlite_rows(db_path, table, lim)
+    except sqlite3.Error as e:
+        return {
+            "columns": [],
+            "rows": [],
+            "db": meta,
+            "sqlite_error": str(e),
+        }
     return {
         "columns": cols,
         "rows": [list(r) for r in rows],
-        "db": {
-            "config_path": rel,
-            "resolved_path": rel_display,
-            "resolved_exists": db_path.is_file(),
-        },
+        "db": meta,
     }
+
+
+@app.get("/api/debug/sqlite")
+def debug_sqlite() -> dict[str, Any]:
+    """Where the panel looks for DB files (same logic as table views)."""
+    out: list[dict[str, Any]] = []
+    for s in _load_strategies():
+        sid = s.get("id")
+        sq = _sqlite_block(s)
+        if not sq or not sq.get("path"):
+            continue
+        rel = str(sq["path"])
+        try:
+            db_path = _resolve_db_path(rel)
+        except HTTPException as e:
+            out.append(
+                {
+                    "strategy_id": sid,
+                    "config_path": rel,
+                    "error": e.detail,
+                }
+            )
+            continue
+        entry: dict[str, Any] = {
+            "strategy_id": sid,
+            "config_path": rel,
+            "absolute_path": str(db_path.resolve()),
+            "exists": db_path.is_file(),
+            "size_bytes": db_path.stat().st_size if db_path.is_file() else None,
+            "tables_in_file": [],
+        }
+        if db_path.is_file():
+            try:
+                conn = _sqlite_connect_read(db_path)
+                try:
+                    cur = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    )
+                    entry["tables_in_file"] = [r[0] for r in cur.fetchall()]
+                finally:
+                    conn.close()
+            except sqlite3.Error as e:
+                entry["sqlite_error"] = str(e)
+        out.append(entry)
+    return {"repo_root": str(_REPO.resolve()), "strategies": out}
 
 
 def _weather_snapshot_payload() -> dict[str, Any]:
@@ -499,8 +558,7 @@ def btc_hourly_success(sid: str) -> dict[str, Any]:
     cnt = [0] * 24
     if not db_path.is_file():
         return {"hours": list(range(24)), "pct": pct, "count": cnt}
-    uri = _sqlite_uri_readonly(db_path)
-    conn = sqlite3.connect(uri, uri=True, timeout=15)
+    conn = _sqlite_connect_read(db_path)
     try:
         cur = conn.execute(
             """

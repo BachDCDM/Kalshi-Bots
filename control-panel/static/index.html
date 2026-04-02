@@ -28,6 +28,9 @@
     .overview-tile { background: #0b0f14; border-radius: 8px; padding: 0.75rem 0.85rem; }
     .overview-tile .big { font-size: 1.15rem; font-weight: 600; }
     .acct-stat { margin-top: 0.35rem; font-size: 0.9rem; }
+    .db-ok { color: var(--ok); font-weight: 600; }
+    .db-miss { color: var(--bad); font-weight: 600; }
+    .db-path { font-size: 0.72rem; color: var(--muted); word-break: break-all; }
     .tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
     .tabs button { opacity: 0.85; }
     .tabs button.on { opacity: 1; outline: 1px solid var(--accent); }
@@ -57,7 +60,7 @@
     <nav class="nav-main" id="nav-main"></nav>
   </header>
   <main id="main"></main>
-  <p class="hint" style="padding:0 1.25rem 1rem">Overview refreshes account balance every 60s · <code>/api/health</code></p>
+  <p class="hint" style="padding:0 1.25rem 1rem">Overview refreshes account balance and DB status every 60s · <code>/api/health</code></p>
 
 <script>
 async function api(path, opts) {
@@ -113,6 +116,37 @@ function applyMetricsToCard(card, s) {
   }
 }
 
+function renderSqliteDebug(sq) {
+  if (!sq || !sq.strategies) return '<p class="hint">No SQLite strategies configured.</p>';
+  let h = '<p class="hint" style="margin:0 0 0.5rem">Repo: <code>' + escapeHtml(sq.repo_root || '') + '</code></p>';
+  for (const s of sq.strategies) {
+    h += '<div class="overview-tile" style="margin-bottom:0.5rem">';
+    h += '<strong>' + escapeHtml(s.strategy_id || '') + '</strong> ';
+    if (s.error) {
+      h += '<span class="db-miss">path error</span>';
+      h += '<div class="hint">' + escapeHtml(s.error) + '</div>';
+    } else if (s.exists) {
+      h += '<span class="db-ok">exists</span>';
+      const sz = s.size_bytes != null ? ' · ' + s.size_bytes + ' bytes' : '';
+      h += '<span class="hint">' + sz + '</span>';
+    } else {
+      h += '<span class="db-miss">missing</span>';
+      h += '<span class="hint"> (start the bot once to create the file)</span>';
+    }
+    h += '<div class="db-path">' + escapeHtml(s.absolute_path || '') + '</div>';
+    if (s.sqlite_error) {
+      h += '<div style="color:var(--bad);font-size:0.8rem;margin-top:0.25rem">' + escapeHtml(s.sqlite_error) + '</div>';
+    }
+    if (s.tables_in_file && s.tables_in_file.length) {
+      h += '<div class="hint" style="margin-top:0.35rem">Tables: <code>' + s.tables_in_file.map(escapeHtml).join('</code>, <code>') + '</code></div>';
+    } else if (s.exists && !s.sqlite_error) {
+      h += '<div class="hint" style="margin-top:0.35rem">No tables found in file.</div>';
+    }
+    h += '</div>';
+  }
+  return h;
+}
+
 async function loadOverview(pageEl) {
   const root = pageEl.querySelector('[data-overview-root]');
   if (!root) return;
@@ -123,10 +157,14 @@ async function loadOverview(pageEl) {
   const gridEl = root.querySelector('[data-overview-strats]');
   const totalEl = root.querySelector('[data-total-pnl]');
   const hintEl = root.querySelector('[data-heartbeat-hint]');
+  const sqliteEl = root.querySelector('[data-overview-sqlite]');
   try {
-    const j = await api('/api/overview');
+    const [j, sq] = await Promise.all([
+      api('/api/overview'),
+      api('/api/debug/sqlite').catch(function () { return null; }),
+    ]);
     if (hintEl) {
-      hintEl.textContent = 'Balance heartbeat: every ' + (j.heartbeat_interval_sec || 60) + 's from server (.env used: CONTROL_PANEL_BALANCE_ENV or .env).';
+      hintEl.textContent = 'Refreshes every ' + (j.heartbeat_interval_sec || 60) + 's while on this tab: balance API + SQLite file check (<code>KALSHI_TRADING_ROOT</code> / <code>strategies.yaml</code> paths).';
     }
     if (modeEl) modeEl.innerHTML = modeBadgeHtml(j.account_trading_mode, j.account_trading_mode_label);
     if (balEl) balEl.innerHTML = 'Available: <span class="big">' + fmtCents(j.balance_cents) + '</span>';
@@ -134,6 +172,9 @@ async function loadOverview(pageEl) {
     if (errEl) {
       errEl.textContent = j.balance_error ? ('Balance API: ' + j.balance_error) : '';
       errEl.style.display = j.balance_error ? 'block' : 'none';
+    }
+    if (sqliteEl) {
+      sqliteEl.innerHTML = sq ? renderSqliteDebug(sq) : '<p class="hint" style="color:var(--bad)">Could not load DB status.</p>';
     }
     if (totalEl) totalEl.innerHTML = '<span class="big">' + fmtCents(j.total_pnl_cents) + '</span> <span class="hint">(sum of per-bot logged metrics below)</span>';
     if (gridEl && j.strategies) {
@@ -147,6 +188,7 @@ async function loadOverview(pageEl) {
     }
   } catch (e) {
     if (errEl) { errEl.style.display = 'block'; errEl.textContent = String(e); }
+    if (sqliteEl) sqliteEl.innerHTML = '<p class="hint" style="color:var(--bad)">' + escapeHtml(String(e)) + '</p>';
   }
 }
 
@@ -162,6 +204,9 @@ function buildOverviewPage() {
     '<div data-balance class="acct-stat"></div>' +
     '<div data-portfolio class="acct-stat"></div>' +
     '<p class="hint" data-bal-err style="display:none;color:var(--bad)"></p>' +
+    '<h3 style="font-size:0.95rem;margin:1rem 0 0.35rem;font-weight:600">Trade log databases</h3>' +
+    '<p class="hint" style="margin:0 0 0.5rem">Whether each SQLite file exists on the server (same paths as the Bots → tables tabs).</p>' +
+    '<div data-overview-sqlite>Loading…</div>' +
     '<h3 style="font-size:0.95rem;margin:1rem 0 0.35rem;font-weight:600">Bots</h3>' +
     '<div class="overview-grid" data-overview-strats></div>' +
     '<h3 style="font-size:0.95rem;margin:1rem 0 0.35rem;font-weight:600">Combined logged P&amp;L</h3>' +
@@ -281,8 +326,16 @@ function loadWeatherSnapshot(el, sid) {
 }
 
 function loadTable(el, sid, table, limit) {
+  if (!el) return;
   api('/api/strategies/' + sid + '/tables/' + table + '?limit=' + (limit || 200)).then((j) => {
     const db = j.db || {};
+    const rowList = j.rows || [];
+    if (j.sqlite_error) {
+      el.innerHTML = '<p class="hint" style="color:var(--bad)">SQLite: ' + escapeHtml(j.sqlite_error) + '</p>' +
+        '<p class="hint">Resolved: <code>' + escapeHtml(db.resolved_path || '') + '</code> · exists: ' + !!db.resolved_exists +
+        (db.repo_root ? ' · repo: <code>' + escapeHtml(db.repo_root) + '</code>' : '') + '</p>';
+      return;
+    }
     if (!j.columns || !j.columns.length) {
       let msg = '<p class="hint">No table schema (database missing or empty file).</p>';
       if (!db.resolved_exists) {
@@ -295,7 +348,7 @@ function loadTable(el, sid, table, limit) {
     if (!db.resolved_exists) {
       h += '<p class="hint" style="color:var(--bad)">DB file missing at <code>' + escapeHtml(db.resolved_path || '') + '</code>.</p>';
     }
-    if (db.resolved_exists && (!j.rows || !j.rows.length)) {
+    if (db.resolved_exists && !rowList.length) {
       if (table === 'trades') {
         h += '<p class="hint">No trade rows yet. Rows are added when the weather bot successfully places an order (<code>log_trade_open</code>) and updated on close.</p>';
       } else if (table === 'btc_sessions') {
@@ -307,7 +360,7 @@ function loadTable(el, sid, table, limit) {
     h += '<div class="table-wrap"><table><thead><tr>';
     h += j.columns.map((c) => '<th>' + escapeHtml(c) + '</th>').join('');
     h += '</tr></thead><tbody>';
-    for (const row of j.rows) {
+    for (const row of rowList) {
       h += '<tr>' + row.map((c) => '<td>' + (c === null ? '' : escapeHtml(String(c))) + '</td>').join('') + '</tr>';
     }
     h += '</tbody></table></div>';
@@ -342,7 +395,10 @@ function wireControls(cardRoot, s) {
 function buildStrategyPage(s) {
   const id = s.id;
   const isBtc = id === 'btc15m' && s.has_journal && s.sqlite_tables && s.sqlite_tables.includes('btc_sessions');
-  const isWeather = id === 'weather' && s.sqlite_tables && s.sqlite_tables.length;
+  const isWeather = id === 'weather';
+  const weatherTables = isWeather
+    ? ((s.sqlite_tables && s.sqlite_tables.length) ? s.sqlite_tables : ['forecasts', 'signals', 'trades', 'errors'])
+    : [];
   const div = document.createElement('div');
   div.className = 'page';
   div.dataset.page = id;
@@ -369,15 +425,15 @@ function buildStrategyPage(s) {
     inner += '<pre data-role="journal">Loading…</pre>';
   }
 
-  if (isWeather) {
+  if (isWeather && weatherTables.length) {
     inner += '<div class="tabs weather-sub" data-wsid="' + id + '">';
     inner += '<button type="button" class="on" data-sub="edges">Edges &amp; next steps</button>';
-    inner += s.sqlite_tables.map((t) =>
+    inner += weatherTables.map((t) =>
       '<button type="button" data-sub="tbl-' + t + '">' + t + '</button>').join('');
     inner += '</div>';
     inner += '<div class="panel on" data-subpanel="edges"><div data-role="weather-snapshot">Loading…</div>';
     inner += '<p class="hint"><button type="button" data-refresh-weather>Refresh snapshot</button></p></div>';
-    for (const t of s.sqlite_tables) {
+    for (const t of weatherTables) {
       inner += '<div class="panel" data-subpanel="tbl-' + t + '"><div data-wdata="' + id + '" data-table="' + t + '"></div></div>';
     }
   } else if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
@@ -408,7 +464,7 @@ function buildStrategyPage(s) {
     loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
   }
 
-  if (isWeather) {
+  if (isWeather && weatherTables.length) {
     const snapEl = div.querySelector('[data-role="weather-snapshot"]');
     const sub = div.querySelector('.weather-sub');
     const panels = div.querySelectorAll('[data-subpanel]');
