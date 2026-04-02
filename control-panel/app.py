@@ -9,9 +9,11 @@ import asyncio
 import json
 import os
 import re
+import sys
 import sqlite3
 import subprocess
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -70,7 +72,6 @@ def _default_deploy_prefs() -> dict[str, Any]:
     ids = [s["id"] for s in _load_strategies() if s.get("id")]
     return {
         "restart_on_pull": {i: False for i in ids},
-        "restart_control_panel_after_pull": False,
     }
 
 
@@ -90,10 +91,6 @@ def _load_deploy_prefs() -> dict[str, Any]:
         for k, v in rop.items():
             if k in valid:
                 base["restart_on_pull"][k] = bool(v)
-    if "restart_control_panel_after_pull" in disk:
-        base["restart_control_panel_after_pull"] = bool(
-            disk["restart_control_panel_after_pull"]
-        )
     return base
 
 
@@ -443,6 +440,37 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     return {"columns": cols, "rows": [list(r) for r in rows]}
 
 
+def _weather_snapshot_payload() -> dict[str, Any]:
+    wb = _REPO / "weather-bot"
+    if not wb.is_dir():
+        raise HTTPException(status_code=404, detail="weather-bot not found in repo")
+    path_insert = str(wb.resolve())
+    if path_insert not in sys.path:
+        sys.path.insert(0, path_insert)
+    try:
+        import panel_snapshot as weather_panel_snapshot
+    except ImportError as e:
+        return {
+            "ok": False,
+            "error": f"import panel_snapshot: {e}",
+            "cities": [],
+            "next_steps": [],
+            "constants": {},
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    return weather_panel_snapshot.build_snapshot()
+
+
+@app.get("/api/strategies/{sid}/weather-snapshot")
+def weather_snapshot(sid: str) -> dict[str, Any]:
+    s = _strategy_by_id(sid)
+    if s.get("id") != "weather":
+        raise HTTPException(
+            status_code=400, detail="Only the weather strategy supports this endpoint"
+        )
+    return _weather_snapshot_payload()
+
+
 @app.get("/api/strategies/{sid}/btc-hourly")
 def btc_hourly_success(sid: str) -> dict[str, Any]:
     s = _strategy_by_id(sid)
@@ -485,9 +513,6 @@ def deploy_prefs_get() -> dict[str, Any]:
     ]
     return {
         "restart_on_pull": dict(p["restart_on_pull"]),
-        "restart_control_panel_after_pull": bool(
-            p.get("restart_control_panel_after_pull", False)
-        ),
         "strategies": strat_meta,
         "control_panel_unit": _control_panel_unit(),
     }
@@ -496,10 +521,6 @@ def deploy_prefs_get() -> dict[str, Any]:
 @app.post("/api/deploy/prefs")
 def deploy_prefs_post(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     cur = _load_deploy_prefs()
-    if "restart_control_panel_after_pull" in body:
-        cur["restart_control_panel_after_pull"] = bool(
-            body["restart_control_panel_after_pull"]
-        )
     if isinstance(body.get("restart_on_pull"), dict):
         valid = {s["id"] for s in _load_strategies() if s.get("id")}
         for k, v in body["restart_on_pull"].items():
@@ -538,8 +559,8 @@ def deploy_git_pull() -> dict[str, Any]:
             skipped.append(f"{sid} (restart on pull off)")
 
     panel_sched = False
-    pu = _control_panel_unit()
-    if prefs.get("restart_control_panel_after_pull"):
+    if code == 0:
+        pu = _control_panel_unit()
         try:
             _validate_unit(pu)
         except HTTPException:

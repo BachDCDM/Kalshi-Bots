@@ -76,8 +76,11 @@ let strategies = [];
 let overviewTimer = null;
 
 function modeBadgeHtml(mode, label) {
-  const cls = mode === 'paper' ? 'badge paper' : 'badge live';
-  return '<span class="' + cls + '">' + (label || mode || '') + '</span>';
+  const m = (mode === 'paper') ? 'paper' : 'live';
+  const lbl = label || (m === 'paper' ? 'Paper' : 'Live');
+  const cls = m === 'paper' ? 'badge paper' : 'badge live';
+  const tip = 'Kalshi API environment from KALSHI_HOST in .env (demo = Paper, prod = Live). Not whether the bot process is running.';
+  return '<span class="' + cls + '" title="' + tip + '">' + lbl + '</span>';
 }
 
 function fmtCents(c) {
@@ -190,6 +193,93 @@ function loadLog(el, sid, lines) {
   }).catch((e) => { el.textContent = String(e); });
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function loadWeatherSnapshot(el, sid) {
+  if (!el) return;
+  el.innerHTML = 'Loading…';
+  api('/api/strategies/' + sid + '/weather-snapshot').then((j) => {
+    if (!j.ok && j.error) {
+      el.innerHTML = '<pre class="hint">' + escapeHtml(j.error) + '</pre>';
+      return;
+    }
+    let h = '';
+    if (j.generated_at_utc) {
+      h += '<p class="hint">Snapshot (UTC): ' + escapeHtml(j.generated_at_utc) + '</p>';
+    }
+    h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Next check-ins &amp; when trades can fire</h3>';
+    h += '<ol class="hint" style="margin:0 0 1rem 1.1rem;padding:0">';
+    (j.next_steps || []).forEach((step) => {
+      h += '<li style="margin:0.35rem 0">' + escapeHtml(step) + '</li>';
+    });
+    h += '</ol>';
+    h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Per city — model vs market (edge = model − mid, percentage points)</h3>';
+    for (const c of (j.cities || [])) {
+      h += '<div class="overview-tile" style="margin-bottom:0.75rem">';
+      h += '<strong>' + escapeHtml(c.city) + '</strong>';
+      if (c.timezone) h += ' <code style="font-size:0.7rem">' + escapeHtml(c.timezone) + '</code>';
+      h += '<div class="hint" style="margin-top:0.35rem">' + escapeHtml(c.trade_window_hint || '') + '</div>';
+      if (c.severe_blackout) {
+        h += '<div style="color:var(--bad);font-size:0.8rem">Severe-weather blackout active</div>';
+      }
+      if (c.error) {
+        h += '<div class="hint">' + escapeHtml(c.error) + '</div></div>';
+        continue;
+      }
+      const p = c.projected;
+      if (p) {
+        h += '<div style="margin-top:0.35rem">Proj. high: <strong>' + p.projected_high + '°F</strong>';
+        if (p.is_stale) h += ' <span style="color:var(--bad)">stale forecast</span>';
+        h += ' · forecast age: ' + Math.round(p.forecast_age_minutes) + ' min</div>';
+      }
+      if (c.entry_hours_hint) {
+        h += '<div class="hint">' + escapeHtml(c.entry_hours_hint) + '</div>';
+      }
+      h += '<div class="hint">Target bucket spacing OK: ' + (c.target_bucket_ok ? 'yes' : 'no');
+      if (c.target_distance_f != null) {
+        h += ' (Δ' + c.target_distance_f + '°F from bucket edges)';
+      }
+      h += '</div>';
+      if (c.best_edge_pct != null) {
+        h += '<div>Strongest |edge|: <strong>' + (c.best_edge_pct > 0 ? '+' : '') + c.best_edge_pct + '</strong> pp</div>';
+      }
+      if (c.actionable_signals && c.actionable_signals.length) {
+        h += '<div style="margin-top:0.35rem;color:var(--ok)">Passes all bot filters: ';
+        h += c.actionable_signals.map(function (sig) {
+          return sig.side.toUpperCase() + ' ' + escapeHtml(sig.ticker) + ' edge ' + sig.edge;
+        }).join(' · ');
+        h += '</div>';
+      } else {
+        h += '<div class="hint" style="margin-top:0.35rem">No actionable signal right now (time-to-close, spread, MIN_EDGE, bucket distance, stale).</div>';
+      }
+      const rows = c.bucket_rows || [];
+      if (rows.length) {
+        h += '<div class="table-wrap" style="margin-top:0.5rem"><table><thead><tr>';
+        h += '<th>Bucket</th><th>Model %</th><th>Mid %</th><th>Edge (pp)</th><th>Spr</th></tr></thead><tbody>';
+        for (const r of rows) {
+          h += '<tr><td>' + escapeHtml(r.bucket) + '</td><td>' + r.model_pct + '</td><td>' + r.market_pct + '</td>';
+          h += '<td>' + (r.edge_pct > 0 ? '+' : '') + r.edge_pct + '</td><td>';
+          h += (r.spread != null ? r.spread : '—') + '</td></tr>';
+        }
+        h += '</tbody></table></div>';
+      }
+      h += '</div>';
+    }
+    if (j.constants) {
+      const k = j.constants;
+      h += '<p class="hint">Bot thresholds: MIN_EDGE ' + k.min_edge + ', max spread ' + k.max_spread_cents;
+      h += '¢, min °F from bucket edge ' + k.min_bucket_edge_distance_f + ', new entries when ';
+      h += k.entry_hours_min + '–' + k.entry_hours_max + 'h to market close.</p>';
+    }
+    el.innerHTML = h;
+  }).catch((e) => { el.innerHTML = '<pre>' + escapeHtml(String(e)) + '</pre>'; });
+}
+
 function loadTable(el, sid, table, limit) {
   api('/api/strategies/' + sid + '/tables/' + table + '?limit=' + (limit || 200)).then((j) => {
     if (!j.columns || !j.columns.length) { el.innerHTML = '<pre>(no rows or DB missing)</pre>'; return; }
@@ -228,6 +318,7 @@ function wireControls(cardRoot, s) {
 function buildStrategyPage(s) {
   const id = s.id;
   const isBtc = id === 'btc15m' && s.has_journal && s.sqlite_tables && s.sqlite_tables.includes('btc_sessions');
+  const isWeather = id === 'weather' && s.sqlite_tables && s.sqlite_tables.length;
   const div = document.createElement('div');
   div.className = 'page';
   div.dataset.page = id;
@@ -254,7 +345,18 @@ function buildStrategyPage(s) {
     inner += '<pre data-role="journal">Loading…</pre>';
   }
 
-  if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
+  if (isWeather) {
+    inner += '<div class="tabs weather-sub" data-wsid="' + id + '">';
+    inner += '<button type="button" class="on" data-sub="edges">Edges &amp; next steps</button>';
+    inner += s.sqlite_tables.map((t) =>
+      '<button type="button" data-sub="tbl-' + t + '">' + t + '</button>').join('');
+    inner += '</div>';
+    inner += '<div class="panel on" data-subpanel="edges"><div data-role="weather-snapshot">Loading…</div>';
+    inner += '<p class="hint"><button type="button" data-refresh-weather>Refresh snapshot</button></p></div>';
+    for (const t of s.sqlite_tables) {
+      inner += '<div class="panel" data-subpanel="tbl-' + t + '"><div data-wdata="' + id + '" data-table="' + t + '"></div></div>';
+    }
+  } else if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
     inner += '<div class="tabs" data-wtabs="' + id + '"></div><div data-wdata="' + id + '"></div>';
   }
 
@@ -282,7 +384,27 @@ function buildStrategyPage(s) {
     loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
   }
 
-  if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
+  if (isWeather) {
+    const snapEl = div.querySelector('[data-role="weather-snapshot"]');
+    const sub = div.querySelector('.weather-sub');
+    const panels = div.querySelectorAll('[data-subpanel]');
+    function showWeatherSub(name) {
+      sub.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.sub === name));
+      panels.forEach((p) => p.classList.toggle('on', p.dataset.subpanel === name));
+      if (name === 'edges') loadWeatherSnapshot(snapEl, id);
+      if (name.indexOf('tbl-') === 0) {
+        const tbl = name.slice(4);
+        const holder = div.querySelector('[data-wdata="' + id + '"][data-table="' + tbl + '"]');
+        loadTable(holder, id, tbl, 200);
+      }
+    }
+    sub.querySelectorAll('button').forEach((btn) => {
+      btn.onclick = () => showWeatherSub(btn.dataset.sub);
+    });
+    const refBtn = div.querySelector('[data-refresh-weather]');
+    if (refBtn) refBtn.onclick = () => loadWeatherSnapshot(snapEl, id);
+    loadWeatherSnapshot(snapEl, id);
+  } else if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
     const tabEl = div.querySelector('[data-wtabs="' + id + '"]');
     const dataEl = div.querySelector('[data-wdata="' + id + '"]');
     tabEl.innerHTML = s.sqlite_tables.map((t, i) =>
@@ -318,13 +440,20 @@ function showPage(main, nav, pageId) {
     const pg = main.querySelector('.page[data-page="deploy"]');
     if (pg) loadDeployUI(pg);
   }
+  if (pageId === 'weather') {
+    const pg = main.querySelector('.page[data-page="weather"]');
+    const snap = pg && pg.querySelector('[data-role="weather-snapshot"]');
+    const subOn = pg && pg.querySelector('.weather-sub button.on');
+    if (snap && subOn && subOn.dataset.sub === 'edges') {
+      loadWeatherSnapshot(snap, 'weather');
+    }
+  }
 }
 
 async function loadDeployUI(container) {
   const root = container.querySelector('[data-deploy-root]');
   if (!root) return;
   const listEl = root.querySelector('[data-deploy-toggles]');
-  const panelCb = root.querySelector('[data-panel-restart]');
   const outEl = root.querySelector('#deploy-out');
   try {
     const p = await api('/api/deploy/prefs');
@@ -349,18 +478,6 @@ async function loadDeployUI(container) {
       };
       listEl.appendChild(row);
     });
-    if (panelCb) {
-      panelCb.checked = !!p.restart_control_panel_after_pull;
-      panelCb.onchange = async () => {
-        try {
-          await api('/api/deploy/prefs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ restart_control_panel_after_pull: panelCb.checked }),
-          });
-        } catch (e) { alert(e); panelCb.checked = !panelCb.checked; }
-      };
-    }
     const unitHint = root.querySelector('[data-panel-unit]');
     if (unitHint) unitHint.textContent = p.control_panel_unit || '';
     outEl.textContent = '';
@@ -377,9 +494,8 @@ function buildDeployPage() {
     '<div class="card" data-deploy-root>' +
     '<strong>Deploy</strong>' +
     '<p class="hint">Run <code>git pull</code> in the repo on this machine (<code>KALSHI_TRADING_ROOT</code>). Per strategy, <strong>Restart on pull</strong> runs <code>systemctl --user restart</code> for that unit after a pull so new code loads (stopped services will start). If off, the unit is left as-is until you use Start/Restart on the strategy tab.</p>' +
-    '<p class="hint">Control panel unit: <code data-panel-unit></code>. Optional <strong>Restart control panel after pull</strong> schedules a restart after ~2s so the response can return first.</p>' +
+    '<p class="hint">After a <strong>successful</strong> pull, the control panel always restarts itself (~2s delay) so UI/API code updates load. Unit: <code data-panel-unit></code>.</p>' +
     '<div data-deploy-toggles></div>' +
-    '<div class="toggle-row"><label for="panel-restart-cb">Restart control panel after pull</label><input type="checkbox" id="panel-restart-cb" data-panel-restart /></div>' +
     '<div class="row" style="margin-top:1rem">' +
     '<button type="button" class="primary" data-git-pull>Git pull &amp; update</button></div>' +
     '<pre id="deploy-out" class="hint"></pre></div>';

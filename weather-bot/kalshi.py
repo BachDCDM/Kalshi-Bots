@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import certifi
@@ -80,6 +82,41 @@ def _parse_close_local(m: Any, tz) -> datetime:
     return dt.astimezone(tz)
 
 
+def _market_from_api_dict(m: dict[str, Any]) -> Any:
+    """Lightweight object with attribute access; avoids strict SDK Market parsing."""
+    bag = SimpleNamespace()
+    for k, v in m.items():
+        setattr(bag, k, v)
+    return bag
+
+
+def _get_markets_open_page_raw(
+    client: KalshiClient,
+    *,
+    limit: int = 200,
+    cursor: Optional[str],
+) -> tuple[list[Any], str]:
+    """GET /markets as JSON; Kalshi sometimes returns nulls the SDK Market model rejects."""
+    raw_resp = client.get_markets_without_preload_content(
+        status="open",
+        limit=limit,
+        cursor=cursor or None,
+        mve_filter="exclude",
+    )
+    if getattr(raw_resp, "status", 200) != 200:
+        raise RuntimeError(f"get_markets HTTP {getattr(raw_resp, 'status', '?')}")
+    body = raw_resp.read()
+    if isinstance(body, str):
+        text = body
+    else:
+        text = body.decode("utf-8")
+    payload = json.loads(text)
+    markets_raw = payload.get("markets") or []
+    next_cursor = str(payload.get("cursor") or "").strip()
+    markets = [_market_from_api_dict(dict(m)) for m in markets_raw if isinstance(m, dict)]
+    return markets, next_cursor
+
+
 def fetch_open_temp_markets_for_city(
     client: KalshiClient,
     kalshi_name_variants: list[str],
@@ -92,9 +129,7 @@ def fetch_open_temp_markets_for_city(
     variants_l = [v.lower() for v in kalshi_name_variants]
 
     while True:
-        r = client.get_markets(status="open", limit=200, cursor=cursor, mve_filter="exclude")
-        markets = getattr(r, "markets", None) or []
-        cursor = getattr(r, "cursor", None) or ""
+        markets, next_c = _get_markets_open_page_raw(client, limit=200, cursor=cursor)
         for m in markets:
             title = (getattr(m, "title", None) or "").lower()
             if not any(v in title for v in variants_l):
@@ -110,8 +145,9 @@ def fetch_open_temp_markets_for_city(
             if cl != today_local:
                 continue
             out.append(m)
-        if not cursor:
+        if not next_c:
             break
+        cursor = next_c
     return out
 
 
