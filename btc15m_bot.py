@@ -2,6 +2,12 @@
 """
 Kalshi BTC 15m market bot: dual-sided entry bids in the first N minutes, then exit limit.
 
+Each completed market session appends a row to ``btc15m_data/trades.db`` (``btc_sessions``).
+``success`` is 1 only if an exit was placed (``exit_handled``), exactly one entry leg filled,
+and ``exit_cents > entry_cents`` (intended take-profit threshold). It does not wait for exit
+fills or settlement. ``lowest_yes_mid_cents_first5`` is the minimum YES midpoint (¢) sampled
+during the entry window after open.
+
 Environment (or use a ``.env`` file next to this script — see ``.env.example``):
   KALSHI_API_KEY_ID — API key ID from Kalshi
   Private key (use one):
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 import time
 import uuid
@@ -134,6 +141,7 @@ class Session:
     entries_submitted: bool = False
     exit_handled: bool = False
     post_entry_cleanup_done: bool = False
+    min_yes_mid_cents_first5: Optional[int] = None
 
     def cid_yes(self) -> str:
         return f"b15m-{self.session_id}-y"
@@ -146,6 +154,182 @@ class Session:
 
     def cid_sell_no(self) -> str:
         return f"b15m-{self.session_id}-sn"
+
+
+def _trade_db_path() -> Path:
+    d = _ROOT / "btc15m_data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "trades.db"
+
+
+def _init_trade_db() -> None:
+    path = _trade_db_path()
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS btc_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ended_at_utc TEXT NOT NULL,
+                ended_hour_utc INTEGER NOT NULL,
+                market_ticker TEXT,
+                market_open_utc TEXT,
+                market_close_utc TEXT,
+                entry_cents INTEGER,
+                exit_cents INTEGER,
+                yes_entry_fills REAL,
+                no_entry_fills REAL,
+                exit_handled INTEGER,
+                lowest_yes_mid_cents_first5 INTEGER,
+                success INTEGER NOT NULL,
+                prev1_success INTEGER,
+                prev2_success INTEGER,
+                prev3_success INTEGER,
+                prev4_success INTEGER
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _yes_mid_cents_from_snap(snap: Any) -> Optional[int]:
+    bid = getattr(snap, "yes_bid_dollars", None)
+    ask = getattr(snap, "yes_ask_dollars", None)
+    try:
+        bc = int(round(float(bid) * 100)) if bid not in (None, "") else None
+        ac = int(round(float(ask) * 100)) if ask not in (None, "") else None
+        if bc is not None and ac is not None:
+            return (bc + ac) // 2
+        if bc is not None:
+            return bc
+        if ac is not None:
+            return ac
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _prev_four_success_columns(conn: sqlite3.Connection) -> tuple[Optional[int], ...]:
+    cur = conn.execute(
+        "SELECT success FROM btc_sessions ORDER BY id DESC LIMIT 4",
+    )
+    asc = list(reversed([r[0] for r in cur.fetchall()]))
+    out: list[Optional[int]] = [None, None, None, None]
+    n = len(asc)
+    for j, v in enumerate(asc):
+        out[4 - n + j] = int(v) if v is not None else None
+    return (out[0], out[1], out[2], out[3])
+
+
+def _compute_session_success(
+    session: Session,
+    entry_cents: int,
+    exit_cents: int,
+    yes_f: float,
+    no_f: float,
+) -> int:
+    if not session.exit_handled:
+        return 0
+    if yes_f > 0 and no_f <= 0:
+        return 1 if exit_cents > entry_cents else 0
+    if no_f > 0 and yes_f <= 0:
+        return 1 if exit_cents > entry_cents else 0
+    return 0
+
+
+def _log_btc_session_row(
+    client: KalshiClient,
+    session: Session,
+    ticker: str,
+    open_t: datetime,
+    close_t: datetime,
+    entry_cents: int,
+    exit_cents: int,
+) -> None:
+    ended = _utc_now()
+    yes_f = 0.0
+    no_f = 0.0
+    if session.yes_order_id:
+        try:
+            yes_f = _fp(
+                _get_order(
+                    client,
+                    session.yes_order_id,
+                    ticker=ticker,
+                    client_order_id=session.cid_yes(),
+                    expected_side="yes",
+                ).fill_count_fp
+            )
+        except Exception:
+            LOG.debug("Trade log: could not read YES entry order", exc_info=True)
+    if session.no_order_id:
+        try:
+            no_f = _fp(
+                _get_order(
+                    client,
+                    session.no_order_id,
+                    ticker=ticker,
+                    client_order_id=session.cid_no(),
+                    expected_side="no",
+                ).fill_count_fp
+            )
+        except Exception:
+            LOG.debug("Trade log: could not read NO entry order", exc_info=True)
+
+    success = _compute_session_success(session, entry_cents, exit_cents, yes_f, no_f)
+    hour_utc = ended.astimezone(timezone.utc).hour
+
+    try:
+        path = _trade_db_path()
+        conn = sqlite3.connect(path, timeout=10)
+        try:
+            p1, p2, p3, p4 = _prev_four_success_columns(conn)
+            conn.execute(
+                """
+                INSERT INTO btc_sessions (
+                    ended_at_utc, ended_hour_utc, market_ticker,
+                    market_open_utc, market_close_utc,
+                    entry_cents, exit_cents,
+                    yes_entry_fills, no_entry_fills, exit_handled,
+                    lowest_yes_mid_cents_first5, success,
+                    prev1_success, prev2_success, prev3_success, prev4_success
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    ended.astimezone(timezone.utc).isoformat(),
+                    hour_utc,
+                    ticker,
+                    open_t.astimezone(timezone.utc).isoformat(),
+                    close_t.astimezone(timezone.utc).isoformat(),
+                    entry_cents,
+                    exit_cents,
+                    yes_f,
+                    no_f,
+                    1 if session.exit_handled else 0,
+                    session.min_yes_mid_first5,
+                    success,
+                    p1,
+                    p2,
+                    p3,
+                    p4,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        LOG.info(
+            "[TRADE_LOG] session saved | success=%s | yes_f=%.1f no_f=%.1f | "
+            "lowest_yes_mid_5m=%s | exit_handled=%s",
+            success,
+            yes_f,
+            no_f,
+            session.min_yes_mid_first5,
+            session.exit_handled,
+        )
+    except Exception:
+        LOG.exception("Trade log: failed to write btc_sessions row")
 
 
 def _find_open_btc15m(client: KalshiClient, series_ticker: str) -> Optional[Any]:
@@ -611,6 +795,19 @@ def run_session(
                 session.entries_submitted = True
                 session.post_entry_cleanup_done = True
 
+        if open_t <= now < entry_end:
+            try:
+                snap_m = client.get_market(ticker=ticker).market
+                mid = _yes_mid_cents_from_snap(snap_m)
+                if mid is not None:
+                    if (
+                        session.min_yes_mid_first5 is None
+                        or mid < session.min_yes_mid_first5
+                    ):
+                        session.min_yes_mid_first5 = mid
+            except Exception:
+                pass
+
         if session.entries_submitted and session.yes_order_id and session.no_order_id:
             _handle_fills(client, session, ticker, exit_cents)
 
@@ -620,6 +817,7 @@ def run_session(
         time.sleep(poll_seconds)
 
     LOG.info("Market close reached for %s — stopping loop (exit orders left working).", ticker)
+    _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
 
 
 def main() -> None:
@@ -635,6 +833,7 @@ def main() -> None:
     poll = float(os.environ.get("KALSHI_POLL_SECONDS", "1.0"))
 
     client = _load_client()
+    _init_trade_db()
     LOG.info(
         "BTC 15m bot | series=%s contracts=%d entry=%dc exit=%dc window=%dm",
         series,

@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Kalshi strategies</title>
+  <style>
+    :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9cb3; --accent:#3d8bfd; --ok:#3ecf8e; --bad:#f85149; --bar:#2d4a6f; }
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.5; min-height: 100vh; }
+    header { padding: 0.75rem 1.25rem; border-bottom: 1px solid #2d3a4f; display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 1rem; }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+    .nav-main { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+    .nav-main button { background: #2d3a4f; color: var(--text); border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    .nav-main button.on { background: var(--accent); color: #fff; }
+    main { padding: 1rem 1.25rem; max-width: 90rem; margin: 0 auto; }
+    .card { background: var(--card); border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 1rem; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
+    button { background: #2d3a4f; color: var(--text); border: none; padding: 0.45rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; }
+    button:hover { background: #3d4d66; }
+    button.primary { background: var(--accent); color: #fff; }
+    .badge { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 4px; background: #2d3a4f; }
+    .badge.active { background: #1f4d3a; color: var(--ok); }
+    .badge.inactive { background: #4d1f1f; color: var(--bad); }
+    .badge.paper { background: #5c4d1f; color: #f5e6a6; }
+    .badge.live { background: #1f3d2f; color: var(--ok); }
+    .overview-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); margin-top: 0.75rem; }
+    .overview-tile { background: #0b0f14; border-radius: 8px; padding: 0.75rem 0.85rem; }
+    .overview-tile .big { font-size: 1.15rem; font-weight: 600; }
+    .acct-stat { margin-top: 0.35rem; font-size: 0.9rem; }
+    .tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
+    .tabs button { opacity: 0.85; }
+    .tabs button.on { opacity: 1; outline: 1px solid var(--accent); }
+    .panel { display: none; }
+    .panel.on { display: block; }
+    pre, .table-wrap { background: #0b0f14; border-radius: 8px; padding: 0.75rem; overflow: auto; font-size: 0.78rem; max-height: min(70vh, 36rem); margin: 0.5rem 0 0; white-space: pre-wrap; word-break: break-word; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
+    th, td { border-bottom: 1px solid #2d3a4f; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: #0b0f14; }
+    .hint { color: var(--muted); font-size: 0.8rem; margin-top: 0.75rem; }
+    .chart { display: flex; align-items: flex-end; gap: 4px; height: 200px; padding: 1rem 0.5rem 0.25rem; background: #0b0f14; border-radius: 8px; margin-top: 0.5rem; }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+    .bar { width: 100%; max-width: 28px; background: var(--bar); border-radius: 4px 4px 0 0; min-height: 2px; transition: height 0.2s; }
+    .bar-label { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
+    .bar-meta { font-size: 0.6rem; color: var(--muted); margin-top: 2px; }
+    .page { display: none; }
+    .page.on { display: block; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.5rem 0; border-bottom: 1px solid #2d3a4f; }
+    .toggle-row label { flex: 1; font-size: 0.875rem; }
+    .toggle-row code { font-size: 0.75rem; color: var(--muted); }
+    #deploy-out { min-height: 4rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Kalshi strategies</h1>
+    <nav class="nav-main" id="nav-main"></nav>
+  </header>
+  <main id="main"></main>
+  <p class="hint" style="padding:0 1.25rem 1rem">Overview refreshes account balance every 60s · <code>/api/health</code></p>
+
+<script>
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  const t = r.headers.get('content-type') || '';
+  return t.includes('json') ? r.json() : r.text();
+}
+
+function badge(st) {
+  const on = (st || '').toLowerCase() === 'active';
+  return '<span class="badge ' + (on ? 'active">running' : 'inactive">stopped') + '</span>';
+}
+
+let strategies = [];
+let overviewTimer = null;
+
+function modeBadgeHtml(mode, label) {
+  const cls = mode === 'paper' ? 'badge paper' : 'badge live';
+  return '<span class="' + cls + '">' + (label || mode || '') + '</span>';
+}
+
+function fmtCents(c) {
+  if (c == null || c === '' || (typeof c === 'number' && !isFinite(c))) return '—';
+  const n = Number(c);
+  const neg = n < 0;
+  const a = Math.abs(n);
+  return (neg ? '-$' : '$') + (a / 100).toFixed(2);
+}
+
+function pnlCaption(src) {
+  if (src === 'realized_trades') return 'realized (DB)';
+  if (src === 'approx_logged_mids') return 'approx. mids × contracts';
+  return 'logged';
+}
+
+function pnlLineHtml(s) {
+  if (!s || !s.pnl_source) return '';
+  return 'Cumulative P&amp;L (' + pnlCaption(s.pnl_source) + '): <strong>' + fmtCents(s.pnl_cents) + '</strong>';
+}
+
+function applyMetricsToCard(card, s) {
+  if (!card || !s) return;
+  const mb = card.querySelector('[data-role="mode-badge"]');
+  if (mb) mb.innerHTML = modeBadgeHtml(s.trading_mode, s.trading_mode_label);
+  const pl = card.querySelector('[data-role="pnl-line"]');
+  if (pl) {
+    const t = pnlLineHtml(s);
+    pl.innerHTML = t || '&nbsp;';
+  }
+}
+
+async function loadOverview(pageEl) {
+  const root = pageEl.querySelector('[data-overview-root]');
+  if (!root) return;
+  const balEl = root.querySelector('[data-balance]');
+  const pvEl = root.querySelector('[data-portfolio]');
+  const errEl = root.querySelector('[data-bal-err]');
+  const modeEl = root.querySelector('[data-acct-mode]');
+  const gridEl = root.querySelector('[data-overview-strats]');
+  const totalEl = root.querySelector('[data-total-pnl]');
+  const hintEl = root.querySelector('[data-heartbeat-hint]');
+  try {
+    const j = await api('/api/overview');
+    if (hintEl) {
+      hintEl.textContent = 'Balance heartbeat: every ' + (j.heartbeat_interval_sec || 60) + 's from server (.env used: CONTROL_PANEL_BALANCE_ENV or .env).';
+    }
+    if (modeEl) modeEl.innerHTML = modeBadgeHtml(j.account_trading_mode, j.account_trading_mode_label);
+    if (balEl) balEl.innerHTML = 'Available: <span class="big">' + fmtCents(j.balance_cents) + '</span>';
+    if (pvEl) pvEl.textContent = 'Portfolio value: ' + fmtCents(j.portfolio_value_cents);
+    if (errEl) {
+      errEl.textContent = j.balance_error ? ('Balance API: ' + j.balance_error) : '';
+      errEl.style.display = j.balance_error ? 'block' : 'none';
+    }
+    if (totalEl) totalEl.innerHTML = '<span class="big">' + fmtCents(j.total_pnl_cents) + '</span> <span class="hint">(sum of per-bot logged metrics below)</span>';
+    if (gridEl && j.strategies) {
+      let h = '';
+      for (const st of j.strategies) {
+        h += '<div class="overview-tile"><strong>' + (st.title || st.id) + '</strong> ';
+        h += modeBadgeHtml(st.trading_mode, st.trading_mode_label);
+        h += '<div class="acct-stat">' + (pnlLineHtml(st) || 'No P&amp;L data') + '</div></div>';
+      }
+      gridEl.innerHTML = h;
+    }
+  } catch (e) {
+    if (errEl) { errEl.style.display = 'block'; errEl.textContent = String(e); }
+  }
+}
+
+function buildOverviewPage() {
+  const div = document.createElement('div');
+  div.className = 'page';
+  div.dataset.page = 'overview';
+  div.innerHTML =
+    '<div class="card" data-overview-root>' +
+    '<strong>Overview</strong>' +
+    '<p class="hint" data-heartbeat-hint></p>' +
+    '<div class="row" style="margin-top:0.5rem;align-items:center;gap:0.5rem">Account <span data-acct-mode></span></div>' +
+    '<div data-balance class="acct-stat"></div>' +
+    '<div data-portfolio class="acct-stat"></div>' +
+    '<p class="hint" data-bal-err style="display:none;color:var(--bad)"></p>' +
+    '<h3 style="font-size:0.95rem;margin:1rem 0 0.35rem;font-weight:600">Bots</h3>' +
+    '<div class="overview-grid" data-overview-strats></div>' +
+    '<h3 style="font-size:0.95rem;margin:1rem 0 0.35rem;font-weight:600">Combined logged P&amp;L</h3>' +
+    '<div data-total-pnl></div></div>';
+  return div;
+}
+
+function renderBtcHourly(container, sid) {
+  api('/api/strategies/' + sid + '/btc-hourly').then((j) => {
+    const maxPct = Math.max(1, ...j.pct, 5);
+    let h = '<p class="hint">% of sessions with <code>success=1</code>: requires <code>exit_handled</code>, exactly one YES/NO entry leg filled, and <code>exit_cents &gt; entry_cents</code> (mid-based; not settlement or confirmed exit fills). Hour = <strong>UTC</strong> when the session was logged. n = sample count.</p>';
+    h += '<div class="chart">';
+    for (let i = 0; i < 24; i++) {
+      const pct = j.pct[i];
+      const n = j.count[i];
+      const hpx = Math.round((pct / maxPct) * 170);
+      h += '<div class="bar-col"><div class="bar" style="height:' + hpx + 'px" title="' + pct + '% (n=' + n + ')"></div>';
+      h += '<span class="bar-label">' + i + 'h</span>';
+      h += '<span class="bar-meta">' + pct + '%</span></div>';
+    }
+    h += '</div>';
+    container.innerHTML = h;
+  }).catch((e) => { container.innerHTML = '<pre>' + String(e) + '</pre>'; });
+}
+
+function loadLog(el, sid, lines) {
+  api('/api/strategies/' + sid + '/logs?lines=' + (lines || 400)).then((j) => {
+    el.textContent = j.log || '(empty)';
+  }).catch((e) => { el.textContent = String(e); });
+}
+
+function loadTable(el, sid, table, limit) {
+  api('/api/strategies/' + sid + '/tables/' + table + '?limit=' + (limit || 200)).then((j) => {
+    if (!j.columns || !j.columns.length) { el.innerHTML = '<pre>(no rows or DB missing)</pre>'; return; }
+    let h = '<div class="table-wrap"><table><thead><tr>';
+    h += j.columns.map((c) => '<th>' + c + '</th>').join('');
+    h += '</tr></thead><tbody>';
+    for (const row of j.rows) {
+      h += '<tr>' + row.map((c) => '<td>' + (c === null ? '' : String(c)) + '</td>').join('') + '</tr>';
+    }
+    h += '</tbody></table></div>';
+    el.innerHTML = h;
+  }).catch((e) => { el.innerHTML = '<pre>' + String(e) + '</pre>'; });
+}
+
+function wireControls(cardRoot, s) {
+  const id = s.id;
+  cardRoot.querySelectorAll('button[data-a]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await api('/api/strategies/' + id + '/' + btn.dataset.a, { method: 'POST' });
+        strategies = await api('/api/strategies');
+        const cur = strategies.find((x) => x.id === id);
+        const b = cardRoot.querySelector('.badge.active, .badge.inactive');
+        if (b && cur) {
+          b.className = 'badge ' + (cur.status === 'active' ? 'active' : 'inactive');
+          b.textContent = cur.status === 'active' ? 'running' : 'stopped';
+        }
+        if (cur) applyMetricsToCard(cardRoot, cur);
+        const logEl = cardRoot.querySelector('[data-role="journal"]');
+        if (logEl && s.has_journal) loadLog(logEl, id, s.journal_lines || 400);
+      } catch (e) { alert(e); }
+    };
+  });
+}
+
+function buildStrategyPage(s) {
+  const id = s.id;
+  const isBtc = id === 'btc15m' && s.has_journal && s.sqlite_tables && s.sqlite_tables.includes('btc_sessions');
+  const div = document.createElement('div');
+  div.className = 'page';
+  div.dataset.page = id;
+
+  let inner = '<div class="card" data-sid="' + id + '">';
+  inner += '<div class="row" style="margin-top:0;align-items:center;gap:0.5rem;flex-wrap:wrap">';
+  inner += '<strong>' + (s.title || id) + '</strong> ';
+  inner += '<span data-role="mode-badge">' + modeBadgeHtml(s.trading_mode, s.trading_mode_label) + '</span> ';
+  inner += badge(s.status) + '</div>';
+  inner += '<div data-role="pnl-line" class="hint" style="margin-top:0.35rem">' + (pnlLineHtml(s) || '&nbsp;') + '</div>';
+  inner += '<div style="color:#8b9cb3;font-size:0.8rem">' + (s.unit || '') + '</div>';
+  inner += '<div class="row">';
+  inner += '<button class="primary" data-a="start">Start</button><button data-a="stop">Stop</button><button data-a="restart">Restart</button></div>';
+
+  if (isBtc) {
+    inner += '<div class="tabs btc-sub" data-btc="' + id + '">';
+    inner += '<button type="button" class="on" data-sub="logs">Logs</button>';
+    inner += '<button type="button" data-sub="trades">Trade log</button>';
+    inner += '<button type="button" data-sub="hourly">Success by hour (UTC)</button></div>';
+    inner += '<div class="panel on" data-subpanel="logs"><pre data-role="journal">Loading…</pre></div>';
+    inner += '<div class="panel" data-subpanel="trades"><div data-role="btc-table"></div></div>';
+    inner += '<div class="panel" data-subpanel="hourly"><div data-role="btc-hourly"></div></div>';
+  } else if (s.has_journal) {
+    inner += '<pre data-role="journal">Loading…</pre>';
+  }
+
+  if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
+    inner += '<div class="tabs" data-wtabs="' + id + '"></div><div data-wdata="' + id + '"></div>';
+  }
+
+  inner += '</div>';
+  div.innerHTML = inner;
+  wireControls(div.querySelector('.card'), s);
+
+  if (isBtc) {
+    const sub = div.querySelector('.btc-sub');
+    const panels = div.querySelectorAll('[data-subpanel]');
+    sub.querySelectorAll('button').forEach((btn) => {
+      btn.onclick = () => {
+        sub.querySelectorAll('button').forEach((b) => b.classList.remove('on'));
+        btn.classList.add('on');
+        const name = btn.dataset.sub;
+        panels.forEach((p) => p.classList.toggle('on', p.dataset.subpanel === name));
+        if (name === 'logs') loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
+        if (name === 'trades') loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', 250);
+        if (name === 'hourly') renderBtcHourly(div.querySelector('[data-role="btc-hourly"]'), id);
+      };
+    });
+    loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
+    loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', 250);
+  } else if (s.has_journal) {
+    loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
+  }
+
+  if (s.sqlite_tables && s.sqlite_tables.length && !isBtc) {
+    const tabEl = div.querySelector('[data-wtabs="' + id + '"]');
+    const dataEl = div.querySelector('[data-wdata="' + id + '"]');
+    tabEl.innerHTML = s.sqlite_tables.map((t, i) =>
+      '<button type="button" class="' + (i === 0 ? 'on' : '') + '" data-t="' + t + '">' + t + '</button>').join('');
+    tabEl.querySelectorAll('button').forEach((btn) => {
+      btn.onclick = () => {
+        tabEl.querySelectorAll('button').forEach((b) => b.classList.remove('on'));
+        btn.classList.add('on');
+        loadTable(dataEl, id, btn.dataset.t, 200);
+      };
+    });
+    loadTable(dataEl, id, s.sqlite_tables[0], 200);
+  }
+
+  return div;
+}
+
+function showPage(main, nav, pageId) {
+  if (overviewTimer) {
+    clearInterval(overviewTimer);
+    overviewTimer = null;
+  }
+  nav.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.target === pageId));
+  main.querySelectorAll('.page').forEach((p) => p.classList.toggle('on', p.dataset.page === pageId));
+  if (pageId === 'overview') {
+    const pg = main.querySelector('.page[data-page="overview"]');
+    if (pg) {
+      loadOverview(pg);
+      overviewTimer = setInterval(function () { loadOverview(pg); }, 60000);
+    }
+  }
+  if (pageId === 'deploy') {
+    const pg = main.querySelector('.page[data-page="deploy"]');
+    if (pg) loadDeployUI(pg);
+  }
+}
+
+async function loadDeployUI(container) {
+  const root = container.querySelector('[data-deploy-root]');
+  if (!root) return;
+  const listEl = root.querySelector('[data-deploy-toggles]');
+  const panelCb = root.querySelector('[data-panel-restart]');
+  const outEl = root.querySelector('#deploy-out');
+  try {
+    const p = await api('/api/deploy/prefs');
+    listEl.innerHTML = '';
+    (p.strategies || []).forEach((meta) => {
+      const sid = meta.id;
+      const row = document.createElement('div');
+      row.className = 'toggle-row';
+      const id = 'rop-' + sid;
+      row.innerHTML = '<label for="' + id + '">' + (meta.title || sid) + ' <code>' + sid + '</code></label>' +
+        '<input type="checkbox" id="' + id + '" data-sid="' + sid + '" />';
+      const cb = row.querySelector('input');
+      cb.checked = !!(p.restart_on_pull && p.restart_on_pull[sid]);
+      cb.onchange = async () => {
+        try {
+          await api('/api/deploy/prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ restart_on_pull: { [sid]: cb.checked } }),
+          });
+        } catch (e) { alert(e); cb.checked = !cb.checked; }
+      };
+      listEl.appendChild(row);
+    });
+    if (panelCb) {
+      panelCb.checked = !!p.restart_control_panel_after_pull;
+      panelCb.onchange = async () => {
+        try {
+          await api('/api/deploy/prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ restart_control_panel_after_pull: panelCb.checked }),
+          });
+        } catch (e) { alert(e); panelCb.checked = !panelCb.checked; }
+      };
+    }
+    const unitHint = root.querySelector('[data-panel-unit]');
+    if (unitHint) unitHint.textContent = p.control_panel_unit || '';
+    outEl.textContent = '';
+  } catch (e) {
+    outEl.textContent = String(e);
+  }
+}
+
+function buildDeployPage() {
+  const div = document.createElement('div');
+  div.className = 'page';
+  div.dataset.page = 'deploy';
+  div.innerHTML =
+    '<div class="card" data-deploy-root>' +
+    '<strong>Deploy</strong>' +
+    '<p class="hint">Run <code>git pull</code> in the repo on this machine (<code>KALSHI_TRADING_ROOT</code>). Per strategy, <strong>Restart on pull</strong> runs <code>systemctl --user restart</code> for that unit after a pull so new code loads (stopped services will start). If off, the unit is left as-is until you use Start/Restart on the strategy tab.</p>' +
+    '<p class="hint">Control panel unit: <code data-panel-unit></code>. Optional <strong>Restart control panel after pull</strong> schedules a restart after ~2s so the response can return first.</p>' +
+    '<div data-deploy-toggles></div>' +
+    '<div class="toggle-row"><label for="panel-restart-cb">Restart control panel after pull</label><input type="checkbox" id="panel-restart-cb" data-panel-restart /></div>' +
+    '<div class="row" style="margin-top:1rem">' +
+    '<button type="button" class="primary" data-git-pull>Git pull &amp; update</button></div>' +
+    '<pre id="deploy-out" class="hint"></pre></div>';
+  div.querySelector('[data-git-pull]').onclick = async () => {
+    const out = div.querySelector('#deploy-out');
+    out.textContent = 'Running…';
+    try {
+      const j = await api('/api/deploy/git-pull', { method: 'POST' });
+      out.textContent = JSON.stringify(j, null, 2);
+      strategies = await api('/api/strategies');
+      document.querySelectorAll('.page[data-page]').forEach((pg) => {
+        if (pg.dataset.page === 'deploy' || !strategies.find((x) => x.id === pg.dataset.page)) return;
+        const card = pg.querySelector('.card[data-sid]');
+        if (!card) return;
+        const sid = card.dataset.sid;
+        const cur = strategies.find((x) => x.id === sid);
+        const b = card.querySelector('.badge.active, .badge.inactive');
+        if (b && cur) {
+          b.className = 'badge ' + (cur.status === 'active' ? 'active' : 'inactive');
+          b.textContent = cur.status === 'active' ? 'running' : 'stopped';
+        }
+        if (cur) applyMetricsToCard(card, cur);
+      });
+    } catch (e) {
+      out.textContent = String(e);
+    }
+  };
+  return div;
+}
+
+async function init() {
+  strategies = await api('/api/strategies');
+  const nav = document.getElementById('nav-main');
+  const main = document.getElementById('main');
+  nav.innerHTML = '';
+  main.innerHTML = '';
+
+  const overviewBtn = document.createElement('button');
+  overviewBtn.type = 'button';
+  overviewBtn.textContent = 'Overview';
+  overviewBtn.dataset.target = 'overview';
+  overviewBtn.onclick = () => showPage(main, nav, 'overview');
+  nav.appendChild(overviewBtn);
+
+  const deployBtn = document.createElement('button');
+  deployBtn.type = 'button';
+  deployBtn.textContent = 'Deploy';
+  deployBtn.dataset.target = 'deploy';
+  deployBtn.onclick = () => showPage(main, nav, 'deploy');
+  nav.appendChild(deployBtn);
+
+  strategies.forEach((s) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = s.title || s.id;
+    b.dataset.target = s.id;
+    b.onclick = () => showPage(main, nav, s.id);
+    nav.appendChild(b);
+  });
+
+  main.appendChild(buildOverviewPage());
+  const deployPage = buildDeployPage();
+  main.appendChild(deployPage);
+  loadDeployUI(deployPage);
+
+  strategies.forEach((s) => {
+    main.appendChild(buildStrategyPage(s));
+  });
+
+  overviewBtn.classList.add('on');
+  showPage(main, nav, 'overview');
+}
+
+init();
+</script>
+</body>
+</html>

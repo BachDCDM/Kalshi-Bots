@@ -7,6 +7,12 @@ logs/
 *.log
 *.jsonl
 
+# BTC bot local trade DB (created at runtime)
+btc15m_data/
+
+# Control panel deploy toggles (local to each machine)
+control-panel/data/
+
 # Python
 __pycache__/
 *.py[cod]

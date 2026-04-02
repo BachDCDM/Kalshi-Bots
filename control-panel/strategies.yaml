@@ -1,13 +1,21 @@
 # Map UI strategies to systemd user units. Clone repo to a path WITHOUT spaces (e.g. ~/kalshi-trading).
 # Install units under ~/.config/systemd/user/ then: systemctl --user daemon-reload
+#
+# Used when "restart control panel after pull" is enabled in the Deploy tab.
+control_panel_unit: kalshi-control-panel.service
 
+# Optional per strategy: kalshi_env_file (relative to repo) for Paper/Live detection. Default .env
 strategies:
   - id: btc15m
     title: "BTC 15m bot"
     systemd_unit: kalshi-btc15m.service
     data:
-      type: journal
-      lines: 300
+      type: mixed
+      journal_lines: 300
+      sqlite:
+        path: btc15m_data/trades.db
+        tables:
+          - btc_sessions
 
   - id: weather
     title: "Weather bot"
@@ -15,7 +23,6 @@ strategies:
     data:
       type: sqlite
       path: weather-bot/db/trades.db
-      lines: 150
       tables:
         - forecasts
         - signals

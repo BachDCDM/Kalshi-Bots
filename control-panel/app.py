@@ -5,16 +5,29 @@ Bind to 127.0.0.1 only. Access remotely: ssh -L 8080:127.0.0.1:8080 user@vps
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import sqlite3
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+
+from kalshi_readout import (
+    get_balance_cache,
+    kalshi_host_from_values,
+    load_strategy_env_map,
+    pnl_btc_approx_cents,
+    pnl_weather_cents,
+    refresh_balance_cache,
+    trading_mode_labels,
+)
 
 _ROOT = Path(__file__).resolve().parent
 _REPO = Path(
@@ -25,15 +38,85 @@ _STRATEGIES_PATH = Path(
     os.environ.get("STRATEGIES_CONFIG", str(_ROOT / "strategies.yaml"))
 )
 
+_STATIC_INDEX = _ROOT / "static" / "index.html"
+
 _UNIT_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.service$")
 
 
-def _load_strategies() -> list[dict[str, Any]]:
+def _strategies_yaml() -> dict[str, Any]:
     if not _STRATEGIES_PATH.is_file():
-        return []
+        return {}
     with open(_STRATEGIES_PATH, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    return list(raw.get("strategies") or [])
+        return yaml.safe_load(f) or {}
+
+
+def _load_strategies() -> list[dict[str, Any]]:
+    return list(_strategies_yaml().get("strategies") or [])
+
+
+def _control_panel_unit() -> str:
+    raw = _strategies_yaml()
+    u = raw.get("control_panel_unit") or os.environ.get(
+        "CONTROL_PANEL_SYSTEMD_UNIT", "kalshi-control-panel.service"
+    )
+    return str(u)
+
+
+def _deploy_prefs_path() -> Path:
+    return _ROOT / "data" / "deploy_prefs.json"
+
+
+def _default_deploy_prefs() -> dict[str, Any]:
+    ids = [s["id"] for s in _load_strategies() if s.get("id")]
+    return {
+        "restart_on_pull": {i: False for i in ids},
+        "restart_control_panel_after_pull": False,
+    }
+
+
+def _load_deploy_prefs() -> dict[str, Any]:
+    base = _default_deploy_prefs()
+    path = _deploy_prefs_path()
+    if not path.is_file():
+        return base
+    try:
+        with open(path, encoding="utf-8") as f:
+            disk = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return base
+    rop = disk.get("restart_on_pull")
+    if isinstance(rop, dict):
+        valid = {s["id"] for s in _load_strategies() if s.get("id")}
+        for k, v in rop.items():
+            if k in valid:
+                base["restart_on_pull"][k] = bool(v)
+    if "restart_control_panel_after_pull" in disk:
+        base["restart_control_panel_after_pull"] = bool(
+            disk["restart_control_panel_after_pull"]
+        )
+    return base
+
+
+def _save_deploy_prefs(prefs: dict[str, Any]) -> None:
+    path = _deploy_prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(prefs, f, indent=2)
+    tmp.replace(path)
+
+
+def _schedule_panel_restart(unit: str) -> None:
+    try:
+        u = _validate_unit(unit)
+    except HTTPException:
+        return
+    subprocess.Popen(
+        ["bash", "-c", f"sleep 2 && systemctl --user restart {u}"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def _strategy_by_id(sid: str) -> dict[str, Any]:
@@ -41,6 +124,31 @@ def _strategy_by_id(sid: str) -> dict[str, Any]:
         if s.get("id") == sid:
             return s
     raise HTTPException(status_code=404, detail="Unknown strategy")
+
+
+def _sqlite_block(s: dict[str, Any]) -> Optional[dict[str, Any]]:
+    data = s.get("data") or {}
+    typ = data.get("type")
+    if typ == "sqlite":
+        return {"path": data.get("path"), "tables": data.get("tables")}
+    if typ == "mixed":
+        inner = data.get("sqlite") or {}
+        return {"path": inner.get("path"), "tables": inner.get("tables")}
+    return None
+
+
+def _has_journal(s: dict[str, Any]) -> bool:
+    data = s.get("data") or {}
+    return data.get("type") in ("journal", "mixed")
+
+
+def _journal_line_cap(s: dict[str, Any]) -> int:
+    data = s.get("data") or {}
+    if data.get("type") == "journal":
+        return int(data.get("lines") or 300)
+    if data.get("type") == "mixed":
+        return int(data.get("journal_lines") or 300)
+    return 300
 
 
 def _validate_unit(unit: str) -> str:
@@ -90,7 +198,9 @@ def _journal_user(unit: str, lines: int) -> str:
 
 def _unit_status(unit: str) -> dict[str, Any]:
     unit = _validate_unit(unit)
-    code, out, _ = _systemctl_user("show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "--no-pager")
+    code, out, _ = _systemctl_user(
+        "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "--no-pager"
+    )
     info: dict[str, Any] = {"unit": unit, "raw": out.strip()}
     for line in out.splitlines():
         if "=" in line:
@@ -103,7 +213,9 @@ def _unit_status(unit: str) -> dict[str, Any]:
 
 def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list[tuple]]:
     forbidden = {";", " ", "\n", "\t", "\r"}
-    if any(c in table for c in forbidden) or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+    if any(c in table for c in forbidden) or not re.match(
+        r"^[a-zA-Z_][a-zA-Z0-9_]*$", table
+    ):
         raise HTTPException(status_code=400, detail="Invalid table name")
     if not db_path.is_file():
         return [], []
@@ -124,7 +236,76 @@ def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list
         conn.close()
 
 
-app = FastAPI(title="Kalshi strategy control", version="1.0")
+def _resolve_db_path(rel: str) -> Path:
+    repo = _REPO.resolve()
+    db_path = (repo / rel).resolve()
+    try:
+        db_path.relative_to(repo)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="DB path outside repo")
+    return db_path
+
+
+HEARTBEAT_INTERVAL_SEC = 60
+
+
+def _balance_env_rel() -> str:
+    return (os.environ.get("CONTROL_PANEL_BALANCE_ENV") or ".env").strip() or ".env"
+
+
+def _strategy_kalshi_env_rel(s: dict[str, Any]) -> str:
+    return (s.get("kalshi_env_file") or ".env").strip() or ".env"
+
+
+def _strategy_trading_mode(s: dict[str, Any]) -> tuple[str, str]:
+    vals = load_strategy_env_map(_REPO, _strategy_kalshi_env_rel(s))
+    host = kalshi_host_from_values(vals)
+    return trading_mode_labels(host)
+
+
+def _strategy_pnl(s: dict[str, Any]) -> tuple[int, str]:
+    sq = _sqlite_block(s)
+    if not sq or not sq.get("path"):
+        return 0, ""
+    try:
+        db_path = _resolve_db_path(str(sq["path"]))
+    except HTTPException:
+        return 0, ""
+    tables = set(sq.get("tables") or [])
+    if "btc_sessions" in tables:
+        return pnl_btc_approx_cents(db_path), "approx_logged_mids"
+    if "trades" in tables:
+        return pnl_weather_cents(db_path), "realized_trades"
+    return 0, ""
+
+
+async def _balance_heartbeat_loop() -> None:
+    envf = _balance_env_rel()
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+        await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    envf = _balance_env_rel()
+    await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
+    task = asyncio.create_task(_balance_heartbeat_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(
+    title="Kalshi strategy control",
+    version="1.0",
+    lifespan=_lifespan,
+)
 
 
 @app.get("/api/health")
@@ -142,6 +323,10 @@ def list_strategies() -> JSONResponse:
         except HTTPException:
             st = {"summary": "error"}
         data = s.get("data") or {}
+        sq = _sqlite_block(s)
+        tables = list(sq["tables"]) if sq and sq.get("tables") else None
+        mode_key, mode_label = _strategy_trading_mode(s)
+        pnl_cents, pnl_src = _strategy_pnl(s)
         out.append(
             {
                 "id": s.get("id"),
@@ -150,14 +335,55 @@ def list_strategies() -> JSONResponse:
                 "status": st.get("summary", "unknown"),
                 "detail": st,
                 "data_type": data.get("type"),
-                "sqlite_tables": (
-                    list(data.get("tables") or [])
-                    if data.get("type") == "sqlite"
-                    else None
-                ),
+                "has_journal": _has_journal(s),
+                "journal_lines": _journal_line_cap(s) if _has_journal(s) else None,
+                "sqlite_tables": tables,
+                "trading_mode": mode_key,
+                "trading_mode_label": mode_label,
+                "pnl_cents": pnl_cents,
+                "pnl_source": pnl_src,
             }
         )
     return JSONResponse(out)
+
+
+@app.get("/api/overview")
+def overview() -> dict[str, Any]:
+    cache = get_balance_cache()
+    rows: list[dict[str, Any]] = []
+    total_pnl = 0
+    for s in _load_strategies():
+        sid = s.get("id")
+        if not sid:
+            continue
+        mode_key, mode_label = _strategy_trading_mode(s)
+        pnl, pnl_src = _strategy_pnl(s)
+        total_pnl += pnl
+        rows.append(
+            {
+                "id": sid,
+                "title": s.get("title", sid),
+                "trading_mode": mode_key,
+                "trading_mode_label": mode_label,
+                "pnl_cents": pnl,
+                "pnl_source": pnl_src,
+            }
+        )
+    bal_vals = load_strategy_env_map(_REPO, _balance_env_rel())
+    acc_host = kalshi_host_from_values(bal_vals)
+    acc_mode_key, acc_mode_label = trading_mode_labels(acc_host)
+    return {
+        "heartbeat_interval_sec": HEARTBEAT_INTERVAL_SEC,
+        "balance_cents": cache.get("balance_cents"),
+        "portfolio_value_cents": cache.get("portfolio_value_cents"),
+        "balance_updated_ts": cache.get("updated_ts"),
+        "balance_fetched_at": cache.get("fetched_at"),
+        "balance_error": cache.get("error"),
+        "account_trading_mode": acc_mode_key,
+        "account_trading_mode_label": acc_mode_label,
+        "strategies": rows,
+        "total_pnl_cents": total_pnl,
+    }
 
 
 @app.post("/api/strategies/{sid}/start")
@@ -193,8 +419,7 @@ def restart_strategy(sid: str) -> dict[str, str]:
 @app.get("/api/strategies/{sid}/logs")
 def strategy_logs(sid: str, lines: int = 200) -> dict[str, str]:
     s = _strategy_by_id(sid)
-    data = s.get("data") or {}
-    if data.get("type") != "journal":
+    if not _has_journal(s):
         raise HTTPException(status_code=400, detail="No journal for this strategy")
     unit = _validate_unit(s["systemd_unit"])
     n = min(max(lines, 1), 2000)
@@ -205,17 +430,12 @@ def strategy_logs(sid: str, lines: int = 200) -> dict[str, str]:
 @app.get("/api/strategies/{sid}/tables/{table}")
 def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     s = _strategy_by_id(sid)
-    data = s.get("data") or {}
-    if data.get("type") != "sqlite":
+    sq = _sqlite_block(s)
+    if not sq or not sq.get("path"):
         raise HTTPException(status_code=400, detail="No SQLite for this strategy")
-    rel = data.get("path", "")
-    repo = _REPO.resolve()
-    db_path = (repo / rel).resolve()
-    try:
-        db_path.relative_to(repo)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="DB path outside repo")
-    allowed = set(data.get("tables") or [])
+    rel = str(sq["path"])
+    db_path = _resolve_db_path(rel)
+    allowed = set(sq.get("tables") or [])
     if table not in allowed:
         raise HTTPException(status_code=404, detail="Table not configured")
     lim = min(max(limit, 1), 500)
@@ -223,135 +443,123 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     return {"columns": cols, "rows": [list(r) for r in rows]}
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Kalshi strategies</title>
-  <style>
-    :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9cb3; --accent:#3d8bfd; --ok:#3ecf8e; --bad:#f85149; }
-    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1.25rem; line-height: 1.5; }
-    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; }
-    .grid { display: grid; gap: 1rem; max-width: 72rem; }
-    .card { background: var(--card); border-radius: 10px; padding: 1rem 1.1rem; }
-    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.75rem; }
-    button { background: #2d3a4f; color: var(--text); border: none; padding: 0.45rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; }
-    button:hover { background: #3d4d66; }
-    button.primary { background: var(--accent); color: #fff; }
-    .badge { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 4px; background: #2d3a4f; }
-    .badge.active { background: #1f4d3a; color: var(--ok); }
-    .badge.inactive { background: #4d1f1f; color: var(--bad); }
-    pre, .table-wrap { background: #0b0f14; border-radius: 8px; padding: 0.75rem; overflow: auto; font-size: 0.78rem; max-height: 22rem; margin: 0.5rem 0 0; white-space: pre-wrap; word-break: break-word; }
-    table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
-    th, td { border-bottom: 1px solid #2d3a4f; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
-    th { color: var(--muted); font-weight: 500; }
-    .tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.5rem; }
-    .tabs button { opacity: 0.85; }
-    .tabs button.on { opacity: 1; outline: 1px solid var(--accent); }
-    .hint { color: var(--muted); font-size: 0.8rem; margin-top: 1rem; }
-  </style>
-</head>
-<body>
-  <h1>Kalshi strategies</h1>
-  <div class="grid" id="root"></div>
-  <p class="hint">API: <code>/api/strategies</code> · Reload page to refresh status. Bind server to 127.0.0.1; use SSH tunnel from your laptop.</p>
-<script>
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(await r.text());
-  const t = r.headers.get('content-type') || '';
-  return t.includes('json') ? r.json() : r.text();
-}
-function badge(st) {
-  const on = (st || '').toLowerCase() === 'active';
-  return '<span class="badge ' + (on ? 'active">running' : 'inactive">stopped') + '</span>';
-}
-function stratCard(s) {
-  const id = s.id;
-  const actions = '<div class="row">' +
-    '<button class="primary" data-a="start" data-id="'+id+'">Start</button>' +
-    '<button data-a="stop" data-id="'+id+'">Stop</button>' +
-    '<button data-a="restart" data-id="'+id+'">Restart</button>' +
-    '</div>';
-  let body = '';
-  if (s.sqlite_tables && s.sqlite_tables.length) {
-    body = '<div class="tabs" id="tabs-'+id+'"></div><div id="data-'+id+'"></div>';
-  } else if (s.data_type === 'journal') {
-    body = '<pre id="log-'+id+'">Loading log…</pre>';
-  } else {
-    body = '<p class="hint" style="margin:0.5rem 0 0">No data source configured.</p>';
-  }
-  return '<div class="card" data-sid="'+id+'"><strong>'+ (s.title||id) +'</strong> ' + badge(s.status) +
-    '<div style="color:#8b9cb3;font-size:0.8rem">'+ (s.unit||'') +'</div>' + actions + body + '</div>';
-}
-async function loadLog(id) {
-  const el = document.getElementById('log-'+id);
-  if (!el) return;
-  try {
-    const j = await api('/api/strategies/'+id+'/logs?lines=300');
-    el.textContent = j.log || '(empty)';
-  } catch (e) { el.textContent = String(e); }
-}
-async function loadTable(id, table) {
-  const el = document.getElementById('data-'+id);
-  if (!el) return;
-  try {
-    const j = await api('/api/strategies/'+id+'/tables/'+table+'?limit=150');
-    if (!j.columns || !j.columns.length) { el.innerHTML = '<pre>(no rows or DB missing)</pre>'; return; }
-    let h = '<div class="table-wrap"><table><tr>' + j.columns.map(c=>'<th>'+c+'</th>').join('') + '</tr>';
-    for (const row of j.rows) {
-      h += '<tr>' + row.map(c=>'<td>'+ (c===null?'':String(c)) +'</td>').join('') + '</tr>';
+@app.get("/api/strategies/{sid}/btc-hourly")
+def btc_hourly_success(sid: str) -> dict[str, Any]:
+    s = _strategy_by_id(sid)
+    sq = _sqlite_block(s)
+    if not sq or "btc_sessions" not in set(sq.get("tables") or []):
+        raise HTTPException(status_code=400, detail="No btc_sessions data for this strategy")
+    db_path = _resolve_db_path(str(sq["path"]))
+    pct = [0.0] * 24
+    cnt = [0] * 24
+    if not db_path.is_file():
+        return {"hours": list(range(24)), "pct": pct, "count": cnt}
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    try:
+        cur = conn.execute(
+            """
+            SELECT ended_hour_utc, SUM(success), COUNT(*)
+            FROM btc_sessions
+            GROUP BY ended_hour_utc
+            """
+        )
+        for h, succ_sum, n in cur.fetchall():
+            hi = int(h)
+            if 0 <= hi <= 23:
+                ni = int(n)
+                cnt[hi] = ni
+                pct[hi] = round(100.0 * int(succ_sum) / ni, 1) if ni else 0.0
+    finally:
+        conn.close()
+    return {"hours": list(range(24)), "pct": pct, "count": cnt}
+
+
+@app.get("/api/deploy/prefs")
+def deploy_prefs_get() -> dict[str, Any]:
+    p = _load_deploy_prefs()
+    strat_meta = [
+        {"id": s["id"], "title": s.get("title", s["id"])}
+        for s in _load_strategies()
+        if s.get("id")
+    ]
+    return {
+        "restart_on_pull": dict(p["restart_on_pull"]),
+        "restart_control_panel_after_pull": bool(
+            p.get("restart_control_panel_after_pull", False)
+        ),
+        "strategies": strat_meta,
+        "control_panel_unit": _control_panel_unit(),
     }
-    h += '</table></div>';
-    el.innerHTML = h;
-  } catch (e) { el.innerHTML = '<pre>'+String(e)+'</pre>'; }
-}
-function sqliteTabs(id, tables) {
-  const tabEl = document.getElementById('tabs-'+id);
-  if (!tabEl) return;
-  tabEl.innerHTML = tables.map((t,i) =>
-    '<button class="'+(i===0?'on':'')+'" data-t="'+t+'">'+t+'</button>').join('');
-  tabEl.querySelectorAll('button').forEach(btn => {
-    btn.onclick = () => {
-      tabEl.querySelectorAll('button').forEach(b => b.classList.remove('on'));
-      btn.classList.add('on');
-      loadTable(id, btn.dataset.t);
-    };
-  });
-  loadTable(id, tables[0]);
-}
-async function refresh() {
-  const list = await api('/api/strategies');
-  const root = document.getElementById('root');
-  root.innerHTML = list.map(stratCard).join('');
-  for (const s of list) {
-    if (s.sqlite_tables && s.sqlite_tables.length) sqliteTabs(s.id, s.sqlite_tables);
-    else if (s.data_type === 'journal') loadLog(s.id);
-  }
-  root.querySelectorAll('button[data-a]').forEach(btn => {
-    btn.onclick = async () => {
-      const id = btn.dataset.id, a = btn.dataset.a;
-      try {
-        await api('/api/strategies/'+id+'/'+a, { method: 'POST' });
-        const list2 = await api('/api/strategies');
-        const cur = list2.find(x => x.id === id);
-        const card = root.querySelector('[data-sid="'+id+'"]');
-        if (card) {
-          const b = card.querySelector('.badge');
-          if (b && cur) { b.className = 'badge ' + (cur.status==='active'?'active':'inactive');
-            b.textContent = cur.status==='active'?'running':'stopped';
-          }
-        }
-        const cur2 = list2.find(x => x.id === id);
-        if (cur2 && cur2.data_type === 'journal') loadLog(id);
-      } catch (e) { alert(e); }
-    };
-  });
-}
-refresh();
-</script>
-</body>
-</html>"""
+
+
+@app.post("/api/deploy/prefs")
+def deploy_prefs_post(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    cur = _load_deploy_prefs()
+    if "restart_control_panel_after_pull" in body:
+        cur["restart_control_panel_after_pull"] = bool(
+            body["restart_control_panel_after_pull"]
+        )
+    if isinstance(body.get("restart_on_pull"), dict):
+        valid = {s["id"] for s in _load_strategies() if s.get("id")}
+        for k, v in body["restart_on_pull"].items():
+            if k in valid:
+                cur["restart_on_pull"][k] = bool(v)
+    _save_deploy_prefs(cur)
+    return deploy_prefs_get()
+
+
+@app.post("/api/deploy/git-pull")
+def deploy_git_pull() -> dict[str, Any]:
+    code, out, err = _run_cmd(["git", "-C", str(_REPO), "pull"], timeout=120)
+    git_out = (out or "").rstrip()
+    if err:
+        git_out = f"{git_out}\n{err}".strip() if git_out else err.strip()
+    prefs = _load_deploy_prefs()
+    restarted: list[str] = []
+    skipped: list[str] = []
+    for s in _load_strategies():
+        sid = s.get("id")
+        unit = s.get("systemd_unit")
+        if not sid or not unit:
+            continue
+        if prefs["restart_on_pull"].get(sid):
+            try:
+                u = _validate_unit(str(unit))
+            except HTTPException:
+                skipped.append(f"{sid} (invalid unit)")
+                continue
+            c2, o2, e2 = _systemctl_user("restart", u)
+            if c2 == 0:
+                restarted.append(u)
+            else:
+                restarted.append(f"{u} (exit {c2}: {e2 or o2})")
+        else:
+            skipped.append(f"{sid} (restart on pull off)")
+
+    panel_sched = False
+    pu = _control_panel_unit()
+    if prefs.get("restart_control_panel_after_pull"):
+        try:
+            _validate_unit(pu)
+        except HTTPException:
+            pass
+        else:
+            _schedule_panel_restart(pu)
+            panel_sched = True
+
+    return {
+        "ok": code == 0,
+        "git_exit": code,
+        "git_output": git_out.strip(),
+        "restarted": restarted,
+        "skipped": skipped,
+        "panel_restart_scheduled": panel_sched,
+    }
+
+
+@app.get("/")
+def index() -> FileResponse:
+    if not _STATIC_INDEX.is_file():
+        raise HTTPException(status_code=500, detail="Missing control-panel/static/index.html")
+    return FileResponse(_STATIC_INDEX)
