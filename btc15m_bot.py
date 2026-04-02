@@ -378,7 +378,7 @@ def _log_btc_session_row(
                     yes_f,
                     no_f,
                     1 if session.exit_handled else 0,
-                    session.min_yes_mid_first5,
+                    session.min_yes_mid_cents_first5,
                     success,
                     p1,
                     p2,
@@ -395,7 +395,7 @@ def _log_btc_session_row(
             success,
             yes_f,
             no_f,
-            session.min_yes_mid_first5,
+            session.min_yes_mid_cents_first5,
             session.exit_handled,
         )
     except Exception:
@@ -891,10 +891,10 @@ def run_session(
                 mid = _yes_mid_cents_from_snap(snap_m)
                 if mid is not None:
                     if (
-                        session.min_yes_mid_first5 is None
-                        or mid < session.min_yes_mid_first5
+                        session.min_yes_mid_cents_first5 is None
+                        or mid < session.min_yes_mid_cents_first5
                     ):
-                        session.min_yes_mid_first5 = mid
+                        session.min_yes_mid_cents_first5 = mid
             except Exception:
                 pass
 
