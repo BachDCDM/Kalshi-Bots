@@ -11,6 +11,8 @@ from typing import Any, Optional
 from config import (
     EARLY_EXIT_MIN_HOURS_REMAINING,
     EARLY_EXIT_PROFIT_CENTS,
+    ENTRY_MAX_HOURS_TO_CLOSE,
+    ENTRY_MIN_HOURS_TO_CLOSE,
     MAX_SPREAD_CENTS,
     MIN_DISTANCE_FROM_BUCKET_EDGE,
     MIN_EDGE,
@@ -103,7 +105,7 @@ def evaluate_trades(
         return []
 
     hours_to_close = (close_time_local - now_local).total_seconds() / 3600.0
-    if hours_to_close < 1 or hours_to_close > 6:
+    if hours_to_close < ENTRY_MIN_HOURS_TO_CLOSE or hours_to_close > ENTRY_MAX_HOURS_TO_CLOSE:
         return []
 
     projected_high = float(projected_high_data["projected_high"])

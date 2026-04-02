@@ -9,6 +9,8 @@ import pytz
 
 from config import (
     CITIES,
+    ENTRY_MAX_HOURS_TO_CLOSE,
+    ENTRY_MIN_HOURS_TO_CLOSE,
     MAX_SPREAD_CENTS,
     MIN_DISTANCE_FROM_BUCKET_EDGE,
     MIN_EDGE,
@@ -88,11 +90,11 @@ def _next_trade_window_hint(now_local: datetime) -> str:
 def _entry_hours_hint(hours: Optional[float]) -> str:
     if hours is None:
         return "No market close time yet."
-    if hours < 1:
-        return f"{hours:.1f}h to close — too soon for new entries (need >1h)."
-    if hours > 6:
-        return f"{hours:.1f}h to close — too early for new entries (need <6h)."
-    return f"{hours:.1f}h to close — inside the 1–6h window where entries are allowed."
+    if hours < ENTRY_MIN_HOURS_TO_CLOSE:
+        return f"{hours:.1f}h to close — too soon for new entries (need >{ENTRY_MIN_HOURS_TO_CLOSE}h)."
+    if hours > ENTRY_MAX_HOURS_TO_CLOSE:
+        return f"{hours:.1f}h to close — too early for new entries (need <{ENTRY_MAX_HOURS_TO_CLOSE}h)."
+    return f"{hours:.1f}h to close — inside the {ENTRY_MIN_HOURS_TO_CLOSE}–{ENTRY_MAX_HOURS_TO_CLOSE}h window where entries are allowed."
 
 
 def analyze_city(
@@ -289,8 +291,8 @@ def build_snapshot() -> dict[str, Any]:
             "min_bucket_edge_distance_f": MIN_DISTANCE_FROM_BUCKET_EDGE,
             "trade_window_start_hour": TRADE_WINDOW_START_HOUR,
             "trade_window_end_hour": TRADE_WINDOW_END_HOUR,
-            "entry_hours_min": 1,
-            "entry_hours_max": 6,
+            "entry_hours_min": ENTRY_MIN_HOURS_TO_CLOSE,
+            "entry_hours_max": ENTRY_MAX_HOURS_TO_CLOSE,
         },
         "generated_at_utc": now_utc.isoformat(),
     }

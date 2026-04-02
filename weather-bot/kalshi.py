@@ -101,7 +101,6 @@ def _get_markets_open_page_raw(
         status="open",
         limit=limit,
         cursor=cursor or None,
-        mve_filter="exclude",
     )
     if getattr(raw_resp, "status", 200) != 200:
         raise RuntimeError(f"get_markets HTTP {getattr(raw_resp, 'status', '?')}")
@@ -115,6 +114,35 @@ def _get_markets_open_page_raw(
     next_cursor = str(payload.get("cursor") or "").strip()
     markets = [_market_from_api_dict(dict(m)) for m in markets_raw if isinstance(m, dict)]
     return markets, next_cursor
+
+
+_TEMP_TICKER_RE = re.compile(r"(TEMP|HIGHTEMP|KXTEMP)", re.IGNORECASE)
+_TEMP_TITLE_KEYWORDS = {"temperature", "temp", "high temp", "daily high"}
+_HIGH_KEYWORDS = {"high", "highest", "hi"}
+
+
+def _is_temp_market(m: Any, city_variants_lower: list[str]) -> bool:
+    """Check if a market is a high-temperature bucket for a given city."""
+    title = (getattr(m, "title", None) or "").lower()
+    ticker = (getattr(m, "ticker", None) or "").lower()
+    event_ticker = (getattr(m, "event_ticker", None) or "").lower()
+    series_ticker = (getattr(m, "series_ticker", None) or "").lower()
+    subtitle = (getattr(m, "subtitle", None) or "").lower()
+    all_text = f"{title} {subtitle} {ticker} {event_ticker} {series_ticker}"
+
+    if not any(v in all_text for v in city_variants_lower):
+        return False
+
+    if _TEMP_TICKER_RE.search(ticker) or _TEMP_TICKER_RE.search(event_ticker) or _TEMP_TICKER_RE.search(series_ticker):
+        return True
+
+    has_temp = any(kw in title for kw in _TEMP_TITLE_KEYWORDS)
+    has_high = any(kw in title for kw in _HIGH_KEYWORDS)
+    if has_temp or has_high:
+        if "°" in title or "degree" in title or has_temp:
+            return True
+
+    return False
 
 
 def fetch_open_temp_markets_for_city(
@@ -131,12 +159,7 @@ def fetch_open_temp_markets_for_city(
     while True:
         markets, next_c = _get_markets_open_page_raw(client, limit=200, cursor=cursor)
         for m in markets:
-            title = (getattr(m, "title", None) or "").lower()
-            if not any(v in title for v in variants_l):
-                continue
-            if "temperature" not in title and "temp" not in title:
-                continue
-            if "high" not in title and "highest" not in title:
+            if not _is_temp_market(m, variants_l):
                 continue
             try:
                 cl = _parse_close_local(m, local_tz).date()
@@ -148,6 +171,13 @@ def fetch_open_temp_markets_for_city(
         if not next_c:
             break
         cursor = next_c
+
+    if not out and variants_l:
+        city_label = kalshi_name_variants[0] if kalshi_name_variants else "?"
+        print(
+            f"[weather] 0 markets matched for {city_label} (today={today_local}). "
+            f"If markets exist, check kalshi_name_variants or title format."
+        )
     return out
 
 

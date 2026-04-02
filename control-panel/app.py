@@ -471,6 +471,30 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     }
 
 
+@app.post("/api/strategies/{sid}/tables/{table}/clear")
+def clear_table(sid: str, table: str) -> dict[str, Any]:
+    s = _strategy_by_id(sid)
+    sq = _sqlite_block(s)
+    if not sq or not sq.get("path"):
+        raise HTTPException(status_code=400, detail="No SQLite for this strategy")
+    db_path = _resolve_db_path(str(sq["path"]))
+    allowed = set(sq.get("tables") or [])
+    if table not in allowed:
+        raise HTTPException(status_code=404, detail="Table not configured")
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table):
+        raise HTTPException(status_code=400, detail="Invalid table name")
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="DB file does not exist")
+    conn = sqlite3.connect(str(db_path.resolve()), timeout=30)
+    try:
+        conn.execute(f'DELETE FROM "{table}"')
+        conn.commit()
+        remaining = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    finally:
+        conn.close()
+    return {"ok": True, "table": table, "remaining_rows": remaining}
+
+
 @app.get("/api/debug/sqlite")
 def debug_sqlite() -> dict[str, Any]:
     """Where the panel looks for DB files (same logic as table views)."""

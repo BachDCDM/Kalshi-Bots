@@ -417,9 +417,12 @@ function loadTable(el, sid, table, limit) {
       h += '<tr>' + row.map((c, ci) => '<td>' + escapeHtml(formatCell(j.columns[ci], c)) + '</td>').join('') + '</tr>';
     }
     h += '</tbody></table></div>';
+    h += '<p class="hint" style="margin-top:0.5rem">';
     if (rowList.length) {
-      h += '<p class="hint" style="margin-top:0.5rem"><button type="button" class="csv-dl-btn">Download CSV</button> <span class="hint">Times shown in ET (stored UTC)</span></p>';
+      h += '<button type="button" class="csv-dl-btn">Download CSV</button> ';
     }
+    h += '<button type="button" class="clear-tbl-btn" style="background:#4d1f1f;color:var(--bad)">Clear all rows</button>';
+    h += ' <span class="hint">Times shown in ET (stored UTC)</span></p>';
     if (db.config_path) {
       h += '<p class="hint">DB: <code>' + escapeHtml(db.resolved_path || db.config_path) + '</code></p>';
     }
@@ -427,6 +430,15 @@ function loadTable(el, sid, table, limit) {
     var dlBtn = el.querySelector('.csv-dl-btn');
     if (dlBtn) {
       dlBtn.onclick = function () { downloadCsv(j.columns, rowList, sid + '_' + table); };
+    }
+    var clrBtn = el.querySelector('.clear-tbl-btn');
+    if (clrBtn) {
+      clrBtn.onclick = function () {
+        if (!confirm('Delete ALL rows from "' + table + '" for ' + sid + '? This cannot be undone.')) return;
+        api('/api/strategies/' + sid + '/tables/' + table + '/clear', { method: 'POST' })
+          .then(function () { loadTable(el, sid, table, limit); })
+          .catch(function (e) { alert('Clear failed: ' + e); });
+      };
     }
   }).catch((e) => { el.innerHTML = '<pre>' + escapeHtml(String(e)) + '</pre>'; });
 }

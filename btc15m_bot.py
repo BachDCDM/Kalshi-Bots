@@ -6,9 +6,9 @@ Each completed market session appends a row to ``btc15m_data/trades.db`` (``btc_
 The same database has ``btc_order_events``: one row when entry YES/NO orders are placed and
 one per exit order, so you can confirm API placement before the session closes.
 
-``success`` is 1 only if an exit was placed (``exit_handled``), exactly one entry leg filled,
-and ``exit_cents > entry_cents`` (intended take-profit threshold). It does not wait for exit
-fills or settlement. ``lowest_yes_mid_cents_first5`` is the minimum YES midpoint (¢) sampled
+``success`` is 1 only when all three conditions hold: an exit was placed (``exit_handled``),
+at least one entry leg filled, AND the exit order itself filled (``exit_fill_count > 0``).
+This confirms the take-profit actually executed, not just that it was placed. ``lowest_yes_mid_cents_first5`` is the minimum YES midpoint (¢) sampled
 during the entry window after open.
 
 Environment (or use a ``.env`` file next to this script — see ``.env.example``):
@@ -296,18 +296,17 @@ def _prev_four_success_columns(conn: sqlite3.Connection) -> tuple[Optional[int],
 
 def _compute_session_success(
     session: Session,
-    entry_cents: int,
-    exit_cents: int,
-    yes_f: float,
-    no_f: float,
+    entry_fills: float,
+    exit_fills: float,
 ) -> int:
+    """success = 1 only when we entered on exactly one leg AND the exit order filled."""
     if not session.exit_handled:
         return 0
-    if yes_f > 0 and no_f <= 0:
-        return 1 if exit_cents > entry_cents else 0
-    if no_f > 0 and yes_f <= 0:
-        return 1 if exit_cents > entry_cents else 0
-    return 0
+    if entry_fills <= 0:
+        return 0
+    if exit_fills <= 0:
+        return 0
+    return 1
 
 
 def _log_btc_session_row(
@@ -356,13 +355,43 @@ def _log_btc_session_row(
                 session.cached_no_fills,
             )
 
-    success = _compute_session_success(session, entry_cents, exit_cents, yes_f, no_f)
+    entry_fills = max(yes_f, no_f)
+
+    exit_f = 0.0
+    sell_oid = session.sell_yes_order_id or session.sell_no_order_id
+    if sell_oid:
+        try:
+            sell_o = _get_order(
+                client,
+                sell_oid,
+                ticker=ticker,
+            )
+            exit_f = _fp(sell_o.fill_count_fp)
+        except Exception:
+            LOG.debug("Trade log: could not read exit order %s", sell_oid)
+
+    success = _compute_session_success(session, entry_fills, exit_f)
     hour_utc = ended.astimezone(timezone.utc).hour
 
     try:
         path = _trade_db_path()
         conn = sqlite3.connect(path, timeout=10)
         try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS _schema_v2_done (v INTEGER)"
+            )
+            cur = conn.execute("SELECT COUNT(*) FROM _schema_v2_done")
+            if cur.fetchone()[0] == 0:
+                for col_def in [
+                    "exit_fill_count REAL",
+                ]:
+                    try:
+                        conn.execute(f"ALTER TABLE btc_sessions ADD COLUMN {col_def}")
+                    except sqlite3.OperationalError:
+                        pass
+                conn.execute("INSERT INTO _schema_v2_done VALUES (1)")
+                conn.commit()
+
             p1, p2, p3, p4 = _prev_four_success_columns(conn)
             conn.execute(
                 """
@@ -372,8 +401,9 @@ def _log_btc_session_row(
                     entry_cents, exit_cents,
                     yes_entry_fills, no_entry_fills, exit_handled,
                     lowest_yes_mid_cents_first5, success,
-                    prev1_success, prev2_success, prev3_success, prev4_success
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    prev1_success, prev2_success, prev3_success, prev4_success,
+                    exit_fill_count
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     ended.astimezone(timezone.utc).isoformat(),
@@ -392,15 +422,18 @@ def _log_btc_session_row(
                     p2,
                     p3,
                     p4,
+                    exit_f,
                 ),
             )
             conn.commit()
         finally:
             conn.close()
         LOG.info(
-            "[TRADE_LOG] session saved | success=%s | yes_f=%.1f no_f=%.1f | "
-            "lowest_yes_mid_5m=%s | exit_handled=%s",
+            "[TRADE_LOG] session saved | success=%s | entry_fills=%.1f exit_fills=%.1f | "
+            "yes_f=%.1f no_f=%.1f | lowest_yes_mid_5m=%s | exit_handled=%s",
             success,
+            entry_fills,
+            exit_f,
             yes_f,
             no_f,
             session.min_yes_mid_cents_first5,
