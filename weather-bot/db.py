@@ -115,6 +115,7 @@ def log_signal(city: str, signal: dict, action: str, skip_reason: str | None = N
 
 
 def log_trade_open(city: str, signal: dict, contracts: int) -> int:
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
@@ -140,6 +141,7 @@ def log_trade_open(city: str, signal: dict, contracts: int) -> int:
 
 
 def log_trade_close(trade_id: int, close_price_cents: int, close_reason: str) -> None:
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(

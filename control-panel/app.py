@@ -208,6 +208,11 @@ def _unit_status(unit: str) -> dict[str, Any]:
     return info
 
 
+def _sqlite_uri_readonly(db_path: Path) -> str:
+    """SQLite URI for read-only open (avoids flaky ``file:/abs/path`` on some systems)."""
+    return db_path.resolve().as_uri() + "?mode=ro"
+
+
 def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list[tuple]]:
     forbidden = {";", " ", "\n", "\t", "\r"}
     if any(c in table for c in forbidden) or not re.match(
@@ -216,8 +221,8 @@ def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list
         raise HTTPException(status_code=400, detail="Invalid table name")
     if not db_path.is_file():
         return [], []
-    uri = f"file:{db_path}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    uri = _sqlite_uri_readonly(db_path)
+    conn = sqlite3.connect(uri, uri=True, timeout=15)
     try:
         cur = conn.execute(f'PRAGMA table_info("{table}")')
         cols = [row[1] for row in cur.fetchall()]
@@ -437,7 +442,19 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Table not configured")
     lim = min(max(limit, 1), 500)
     cols, rows = _sqlite_rows(db_path, table, lim)
-    return {"columns": cols, "rows": [list(r) for r in rows]}
+    try:
+        rel_display = str(db_path.resolve().relative_to(_REPO.resolve()))
+    except ValueError:
+        rel_display = rel
+    return {
+        "columns": cols,
+        "rows": [list(r) for r in rows],
+        "db": {
+            "config_path": rel,
+            "resolved_path": rel_display,
+            "resolved_exists": db_path.is_file(),
+        },
+    }
 
 
 def _weather_snapshot_payload() -> dict[str, Any]:
@@ -482,8 +499,8 @@ def btc_hourly_success(sid: str) -> dict[str, Any]:
     cnt = [0] * 24
     if not db_path.is_file():
         return {"hours": list(range(24)), "pct": pct, "count": cnt}
-    uri = f"file:{db_path}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    uri = _sqlite_uri_readonly(db_path)
+    conn = sqlite3.connect(uri, uri=True, timeout=15)
     try:
         cur = conn.execute(
             """

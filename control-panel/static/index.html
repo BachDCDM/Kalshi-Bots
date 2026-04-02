@@ -282,16 +282,40 @@ function loadWeatherSnapshot(el, sid) {
 
 function loadTable(el, sid, table, limit) {
   api('/api/strategies/' + sid + '/tables/' + table + '?limit=' + (limit || 200)).then((j) => {
-    if (!j.columns || !j.columns.length) { el.innerHTML = '<pre>(no rows or DB missing)</pre>'; return; }
-    let h = '<div class="table-wrap"><table><thead><tr>';
-    h += j.columns.map((c) => '<th>' + c + '</th>').join('');
+    const db = j.db || {};
+    if (!j.columns || !j.columns.length) {
+      let msg = '<p class="hint">No table schema (database missing or empty file).</p>';
+      if (!db.resolved_exists) {
+        msg += '<p class="hint" style="color:var(--bad)">SQLite file not found at <code>' + escapeHtml(db.resolved_path || db.config_path || '') + '</code> under <code>KALSHI_TRADING_ROOT</code>. Start the bot once so it can create the DB, or fix the path in <code>strategies.yaml</code>.</p>';
+      }
+      el.innerHTML = msg;
+      return;
+    }
+    let h = '';
+    if (!db.resolved_exists) {
+      h += '<p class="hint" style="color:var(--bad)">DB file missing at <code>' + escapeHtml(db.resolved_path || '') + '</code>.</p>';
+    }
+    if (db.resolved_exists && (!j.rows || !j.rows.length)) {
+      if (table === 'trades') {
+        h += '<p class="hint">No trade rows yet. Rows are added when the weather bot successfully places an order (<code>log_trade_open</code>) and updated on close.</p>';
+      } else if (table === 'btc_sessions') {
+        h += '<p class="hint">No completed sessions yet. The BTC bot appends a row when each 15m market reaches <strong>close</strong> (not at entry).</p>';
+      } else {
+        h += '<p class="hint">Table exists but has no rows yet.</p>';
+      }
+    }
+    h += '<div class="table-wrap"><table><thead><tr>';
+    h += j.columns.map((c) => '<th>' + escapeHtml(c) + '</th>').join('');
     h += '</tr></thead><tbody>';
     for (const row of j.rows) {
-      h += '<tr>' + row.map((c) => '<td>' + (c === null ? '' : String(c)) + '</td>').join('') + '</tr>';
+      h += '<tr>' + row.map((c) => '<td>' + (c === null ? '' : escapeHtml(String(c))) + '</td>').join('') + '</tr>';
     }
     h += '</tbody></table></div>';
+    if (db.config_path) {
+      h += '<p class="hint">DB: <code>' + escapeHtml(db.resolved_path || db.config_path) + '</code></p>';
+    }
     el.innerHTML = h;
-  }).catch((e) => { el.innerHTML = '<pre>' + String(e) + '</pre>'; });
+  }).catch((e) => { el.innerHTML = '<pre>' + escapeHtml(String(e)) + '</pre>'; });
 }
 
 function wireControls(cardRoot, s) {

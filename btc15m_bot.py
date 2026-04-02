@@ -248,6 +248,7 @@ def _log_btc_session_row(
     entry_cents: int,
     exit_cents: int,
 ) -> None:
+    _init_trade_db()
     ended = _utc_now()
     yes_f = 0.0
     no_f = 0.0
