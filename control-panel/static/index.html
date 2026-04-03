@@ -306,7 +306,8 @@ function formatCell(col, val) {
 }
 
 function utcHourToEstLabel(h) {
-  var d = new Date(Date.UTC(2026, 0, 5, h, 0, 0));
+  var now = new Date();
+  var d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, 0, 0));
   var est = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: true });
   return est.replace(':00 ', '').replace(' ', '');
 }
