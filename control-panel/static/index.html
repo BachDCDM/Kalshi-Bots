@@ -41,11 +41,17 @@
     th, td { border-bottom: 1px solid #2d3a4f; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
     th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: #0b0f14; }
     .hint { color: var(--muted); font-size: 0.8rem; margin-top: 0.75rem; }
-    .chart { display: flex; align-items: flex-end; gap: 4px; height: 200px; padding: 1rem 0.5rem 0.25rem; background: #0b0f14; border-radius: 8px; margin-top: 0.5rem; }
-    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
-    .bar { width: 100%; max-width: 28px; background: var(--bar); border-radius: 4px 4px 0 0; min-height: 2px; transition: height 0.2s; }
-    .bar-label { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
-    .bar-meta { font-size: 0.6rem; color: var(--muted); margin-top: 2px; }
+    .chart-wrap { position: relative; background: #0b0f14; border-radius: 10px; padding: 1.25rem 0.75rem 0.5rem; margin-top: 0.75rem; overflow: hidden; }
+    .chart-grid { position: absolute; inset: 0; pointer-events: none; }
+    .chart-grid line { stroke: rgba(255,255,255,0.05); stroke-width: 1; }
+    .chart-grid text { fill: #4a5568; font-size: 9px; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .chart { display: flex; align-items: flex-end; gap: 3px; height: 190px; position: relative; z-index: 1; }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; cursor: default; }
+    .bar-col:hover .bar { filter: brightness(1.25); }
+    .bar { width: 100%; max-width: 32px; border-radius: 4px 4px 0 0; min-height: 2px; transition: height 0.25s ease, filter 0.15s; }
+    .bar-label { font-size: 0.6rem; color: var(--muted); margin-top: 5px; white-space: nowrap; }
+    .bar-pct { font-size: 0.62rem; font-weight: 600; margin-top: 2px; }
+    .bar-n { font-size: 0.58rem; color: #4a6a8a; margin-top: 1px; }
     .page { display: none; }
     .page.on { display: block; }
     .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.5rem 0; border-bottom: 1px solid #2d3a4f; }
@@ -215,22 +221,48 @@ function buildOverviewPage() {
   return div;
 }
 
+function barColor(pct, hasData) {
+  if (!hasData) return '#1e2d3d';
+  if (pct >= 65) return '#2ea87e';
+  if (pct >= 45) return '#4a9edd';
+  if (pct >= 25) return '#c98a2c';
+  return '#a04040';
+}
+
 function renderBtcHourly(container, sid) {
   api('/api/strategies/' + sid + '/btc-hourly').then((j) => {
-    const maxPct = Math.max(1, ...j.pct, 5);
-    let h = '<p class="hint">% of sessions with <code>success=1</code>: requires <code>exit_handled</code>, exactly one YES/NO entry leg filled, and <code>exit_cents &gt; entry_cents</code> (mid-based; not settlement or confirmed exit fills). Hour = <strong>ET</strong> when the session was logged. n = sample count.</p>';
+    const CHART_H = 190;
+    const maxPct = Math.max(1, ...j.pct, 100);
+    const gridPcts = [25, 50, 75, 100];
+
+    // Build SVG grid overlay
+    let svgLines = '';
+    for (const gp of gridPcts) {
+      const y = Math.round(CHART_H - (gp / maxPct) * (CHART_H - 10)) + 20;
+      svgLines += '<line x1="0" y1="' + y + '" x2="100%" y2="' + y + '"/>';
+      svgLines += '<text x="4" y="' + (y - 3) + '">' + gp + '%</text>';
+    }
+
+    let h = '<p class="hint" style="margin-bottom:0.5rem">Success rate (filled trades only). Bars: <span style="color:#2ea87e">≥65%</span> · <span style="color:#4a9edd">≥45%</span> · <span style="color:#c98a2c">≥25%</span> · <span style="color:#a04040">&lt;25%</span>. Hour = <strong>ET</strong>. n = trades with fills.</p>';
+    h += '<div class="chart-wrap">';
+    h += '<svg class="chart-grid" width="100%" height="100%">' + svgLines + '</svg>';
     h += '<div class="chart">';
     for (let i = 0; i < 24; i++) {
-      var estIdx = ((i - 5) % 24 + 24) % 24;
       const pct = j.pct[i];
       const n = j.count[i];
-      const hpx = Math.round((pct / maxPct) * 170);
+      const hasData = n > 0;
+      const hpx = hasData ? Math.max(3, Math.round((pct / maxPct) * (CHART_H - 10))) : 3;
       const lbl = utcHourToEstLabel(i);
-      h += '<div class="bar-col"><div class="bar" style="height:' + hpx + 'px" title="' + lbl + ': ' + pct + '% (n=' + n + ')"></div>';
+      const color = barColor(pct, hasData);
+      const opacity = hasData ? '' : 'opacity:0.3;';
+      h += '<div class="bar-col" style="' + opacity + '" title="' + lbl + ': ' + (hasData ? pct + '% (n=' + n + ')' : 'no data') + '">';
+      h += '<div class="bar" style="height:' + hpx + 'px;background:' + color + ';box-shadow:0 0 8px ' + color + '44"></div>';
       h += '<span class="bar-label">' + lbl + '</span>';
-      h += '<span class="bar-meta">' + pct + '%</span></div>';
+      h += '<span class="bar-pct" style="color:' + (hasData ? color : '#4a5568') + '">' + (hasData ? pct + '%' : '—') + '</span>';
+      h += '<span class="bar-n">' + (hasData ? 'n=' + n : '') + '</span>';
+      h += '</div>';
     }
-    h += '</div>';
+    h += '</div></div>';
     container.innerHTML = h;
   }).catch((e) => { container.innerHTML = '<pre>' + String(e) + '</pre>'; });
 }

@@ -588,6 +588,7 @@ def btc_hourly_success(sid: str) -> dict[str, Any]:
             """
             SELECT ended_hour_utc, SUM(success), COUNT(*)
             FROM btc_sessions
+            WHERE COALESCE(yes_entry_fills, 0) + COALESCE(no_entry_fills, 0) > 0
             GROUP BY ended_hour_utc
             """
         )

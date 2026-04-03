@@ -39,14 +39,37 @@ from pathlib import Path
 from typing import Any, Optional
 
 import certifi
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.exceptions import NotFoundException
 
 LOG = logging.getLogger("btc15m_bot")
 
 _ROOT = Path(__file__).resolve().parent
-load_dotenv(_ROOT / ".env")
+load_dotenv(_ROOT / ".env", override=False)
+_extra = (os.environ.get("KALSHI_USE_ENV_FILE") or "").strip()
+if _extra:
+    _paper = _ROOT / _extra
+    if not _paper.is_file():
+        print(f"ERROR: KALSHI_USE_ENV_FILE={_extra!r} not found at {_paper}", file=sys.stderr)
+        sys.exit(1)
+    # utf-8-sig strips BOM; interpolate=False so UUIDs / $ in values are not mangled
+    vals = dotenv_values(_paper, encoding="utf-8-sig", interpolate=False) or {}
+    paper_key = (vals.get("KALSHI_API_KEY_ID") or "").strip()
+    if not paper_key:
+        print(
+            f"ERROR: KALSHI_API_KEY_ID is empty in {_extra}. "
+            "Paste the Key ID from https://demo.kalshi.co (Account → API Keys) on the line "
+            "KALSHI_API_KEY_ID=... and save the file.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    for k, v in vals.items():
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            os.environ[k] = s
 
 
 def _fp(s: str) -> float:
@@ -120,7 +143,10 @@ def _load_private_key_pem() -> str:
 def _load_client() -> KalshiClient:
     key_id = (os.environ.get("KALSHI_API_KEY_ID") or "").strip()
     if not key_id:
-        LOG.error("Set KALSHI_API_KEY_ID")
+        LOG.error(
+            "KALSHI_API_KEY_ID is missing. For paper trading, set it in .env.paper; "
+            "for live, set it in .env."
+        )
         sys.exit(1)
     pem = _load_private_key_pem()
     host = os.environ.get(
@@ -130,6 +156,12 @@ def _load_client() -> KalshiClient:
     # This SDK build expects auth values attached as attributes.
     cfg.api_key_id = key_id
     cfg.private_key_pem = pem
+    if "demo-api" in host.lower() or "demo" in host.lower():
+        LOG.warning(
+            "KALSHI_HOST points at the DEMO API. You must use an API key + private key "
+            "created on https://demo.kalshi.co (Settings → API). Production keys return "
+            "401 Unauthorized on create_order."
+        )
     return KalshiClient(cfg)
 
 
@@ -164,7 +196,9 @@ class Session:
 def _trade_db_path() -> Path:
     d = _ROOT / "btc15m_data"
     d.mkdir(parents=True, exist_ok=True)
-    return d / "trades.db"
+    host = (os.environ.get("KALSHI_HOST") or "").lower()
+    is_paper = "demo-api" in host or "demo.kalshi" in host
+    return d / ("trades-paper.db" if is_paper else "trades.db")
 
 
 def _init_trade_db() -> None:
