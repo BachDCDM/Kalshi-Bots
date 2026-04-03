@@ -1043,7 +1043,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     series = os.environ.get("KALSHI_SERIES_TICKER", "KXBTC15M")
-    contracts = int(os.environ.get("KALSHI_CONTRACTS", "10"))
+    contracts = int(os.environ.get("KALSHI_CONTRACTS", "20"))
     entry_cents = int(os.environ.get("KALSHI_ENTRY_CENTS", "25"))
     exit_cents = int(os.environ.get("KALSHI_EXIT_CENTS", "50"))
     entry_min = int(os.environ.get("KALSHI_ENTRY_WINDOW_MINUTES", "5"))
