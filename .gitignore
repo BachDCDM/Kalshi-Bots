@@ -1,8 +1,6 @@
 # Environment variables and secrets
 .env
-.env.paper
 kalshi.pem
-kalshi-paper.pem
 kalshi-demo.pem
 
 # Logs
