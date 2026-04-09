@@ -573,6 +573,41 @@ function wireControls(cardRoot, s) {
   });
 }
 
+function loadBtcContracts(cardRoot, sid) {
+  const inp = cardRoot.querySelector('[data-btc-contracts-input]');
+  const st = cardRoot.querySelector('[data-btc-contracts-status]');
+  const hint = cardRoot.querySelector('[data-btc-contracts-hint]');
+  if (!inp) return;
+  api('/api/strategies/' + sid + '/btc-contracts').then((j) => {
+    inp.min = String(j.min != null ? j.min : 1);
+    inp.max = String(j.max != null ? j.max : 5000);
+    inp.value = String(j.contracts);
+    if (hint) {
+      hint.textContent = j.from_panel_file
+        ? 'Panel override is active (replaces KALSHI_CONTRACTS in .env). Restart the bot after changing.'
+        : 'Using .env KALSHI_CONTRACTS until you save a value here.';
+    }
+    if (st) st.textContent = '';
+  }).catch((e) => { if (st) st.textContent = String(e); });
+  const btn = cardRoot.querySelector('[data-save-btc-contracts]');
+  if (btn) {
+    btn.onclick = async () => {
+      const n = parseInt(String(inp.value), 10);
+      if (!isFinite(n) || n < 1) { alert('Enter a valid contract count'); return; }
+      try {
+        const j = await api('/api/strategies/' + sid + '/btc-contracts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contracts: n }),
+        });
+        inp.value = String(j.contracts);
+        if (st) st.textContent = 'Saved. Restart the bot to apply.';
+        if (hint) hint.textContent = 'Panel override active. Restart BTC 15m.';
+      } catch (e) { alert(e); }
+    };
+  }
+}
+
 function buildStrategyPage(s) {
   const id = s.id;
   const isBtc = id === 'btc15m' && s.has_journal && s.sqlite_tables && s.sqlite_tables.includes('btc_sessions');
@@ -594,6 +629,16 @@ function buildStrategyPage(s) {
   inner += '<div style="color:#8b9cb3;font-size:0.8rem">' + (s.unit || '') + '</div>';
   inner += '<div class="row">';
   inner += '<button class="primary" data-a="start">Start</button><button data-a="stop">Stop</button><button data-a="restart">Restart</button></div>';
+
+  if (isBtc) {
+    inner += '<div class="row" style="margin-top:0.65rem;align-items:center;flex-wrap:wrap;gap:0.5rem">';
+    inner += '<label for="btc-c-' + id + '" style="font-size:0.875rem">Contracts per market</label>';
+    inner += '<input id="btc-c-' + id + '" type="number" data-btc-contracts-input min="1" max="5000" ';
+    inner += 'style="width:5.5rem;padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit" /> ';
+    inner += '<button type="button" data-save-btc-contracts>Save</button> ';
+    inner += '<span class="hint" data-btc-contracts-status></span></div>';
+    inner += '<p class="hint" data-btc-contracts-hint style="margin-top:0.2rem"></p>';
+  }
 
   if (isVolSurface) {
     const volTables = (s.sqlite_tables && s.sqlite_tables.length) ? s.sqlite_tables : ['last_scan', 'order_events', 'trade_outcomes'];
@@ -639,6 +684,9 @@ function buildStrategyPage(s) {
   inner += '</div>';
   div.innerHTML = inner;
   wireControls(div.querySelector('.card'), s);
+  if (isBtc) {
+    loadBtcContracts(div.querySelector('.card'), id);
+  }
 
   if (isVolSurface) {
     const sub = div.querySelector('.vol-sub');

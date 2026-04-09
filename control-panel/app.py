@@ -21,6 +21,13 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
+from btc15m_prefs import (
+    MAX_CONTRACTS,
+    MIN_CONTRACTS,
+    contracts_from_prefs,
+    prefs_path,
+    save_contracts,
+)
 from kalshi_readout import (
     get_balance_cache,
     kalshi_host_from_values,
@@ -423,6 +430,43 @@ def restart_strategy(sid: str) -> dict[str, str]:
     if code != 0:
         raise HTTPException(status_code=500, detail=err or out or f"exit {code}")
     return {"ok": "true", "unit": unit}
+
+
+@app.get("/api/strategies/{sid}/btc-contracts")
+def btc_contracts_get(sid: str) -> dict[str, Any]:
+    if sid != "btc15m":
+        raise HTTPException(status_code=400, detail="Only btc15m supports contract prefs")
+    repo = _REPO.resolve()
+    vals = load_strategy_env_map(repo, ".env")
+    raw = (vals.get("KALSHI_CONTRACTS") or "").strip()
+    try:
+        env_contracts = int(raw) if raw else 30
+    except ValueError:
+        env_contracts = 30
+    file_contracts = contracts_from_prefs(repo)
+    effective = file_contracts if file_contracts is not None else env_contracts
+    return {
+        "contracts": effective,
+        "from_panel_file": file_contracts is not None,
+        "env_kalshi_contracts": env_contracts,
+        "min": MIN_CONTRACTS,
+        "max": MAX_CONTRACTS,
+        "prefs_path": str(prefs_path(repo)),
+    }
+
+
+@app.post("/api/strategies/{sid}/btc-contracts")
+def btc_contracts_post(sid: str, body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    if sid != "btc15m":
+        raise HTTPException(status_code=400, detail="Only btc15m supports contract prefs")
+    c = body.get("contracts")
+    if c is None:
+        raise HTTPException(status_code=400, detail="Missing contracts")
+    try:
+        save_contracts(_REPO.resolve(), int(c))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return btc_contracts_get(sid)
 
 
 @app.get("/api/strategies/{sid}/logs")

@@ -1053,6 +1053,29 @@ def run_session(
         _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
 
 
+def _contracts_from_control_panel_prefs() -> int | None:
+    """
+    Optional override from control-panel/data/btc15m_prefs.json (written by dashboard).
+    Same path relative to repo root as btc15m_bot.py parent.
+    """
+    import json
+
+    try:
+        p = Path(__file__).resolve().parent / "control-panel" / "data" / "btc15m_prefs.json"
+        if not p.is_file():
+            return None
+        d = json.loads(p.read_text(encoding="utf-8"))
+        c = d.get("contracts")
+        if c is None:
+            return None
+        n = int(c)
+        if n < 1 or n > 5000:
+            return None
+        return n
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -1060,6 +1083,9 @@ def main() -> None:
     )
     series = os.environ.get("KALSHI_SERIES_TICKER", "KXBTC15M")
     contracts = int(os.environ.get("KALSHI_CONTRACTS", "30"))
+    panel_c = _contracts_from_control_panel_prefs()
+    if panel_c is not None:
+        contracts = panel_c
     entry_cents = int(os.environ.get("KALSHI_ENTRY_CENTS", "25"))
     exit_cents = int(os.environ.get("KALSHI_EXIT_CENTS", "50"))
     entry_min = int(os.environ.get("KALSHI_ENTRY_WINDOW_MINUTES", "5"))
@@ -1068,12 +1094,13 @@ def main() -> None:
     client = _load_client()
     _init_trade_db()
     LOG.info(
-        "BTC 15m bot | series=%s contracts=%d entry=%dc exit=%dc window=%dm",
+        "BTC 15m bot | series=%s contracts=%d entry=%dc exit=%dc window=%dm%s",
         series,
         contracts,
         entry_cents,
         exit_cents,
         entry_min,
+        " (from control panel prefs)" if panel_c is not None else "",
     )
 
     while True:
