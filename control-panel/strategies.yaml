@@ -29,3 +29,16 @@ strategies:
         - signals
         - trades
         - errors
+
+  - id: vol_surface
+    title: "Vol surface (BTC hourly + weather)"
+    systemd_unit: kalshi-vol-surface.service
+    data:
+      type: mixed
+      journal_lines: 500
+      sqlite:
+        path: vol_surface_data/panel.db
+        tables:
+          - last_scan
+          - order_events
+          - trade_outcomes

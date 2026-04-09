@@ -116,6 +116,24 @@ def fair_yes_lognormal(s_star: float, k: float, sigma: float, t_years: float) ->
     return phi(d2)
 
 
+def fair_yes_lognormal_interval(
+    s_star: float,
+    k_lo: float,
+    k_hi: float,
+    sigma: float,
+    t_years: float,
+) -> float:
+    """
+    Risk-neutral probability that terminal spot lies in (k_lo, k_hi], with k_lo < k_hi.
+    Equals P(S > k_lo) − P(S > k_hi) under the same lognormal used for digital calls.
+    """
+    if k_hi <= k_lo:
+        return 0.0
+    a = fair_yes_lognormal(s_star, k_lo, sigma, t_years)
+    b = fair_yes_lognormal(s_star, k_hi, sigma, t_years)
+    return max(0.0, min(1.0, a - b))
+
+
 def fair_yes_normal(mu_star: float, k: float, sigma: float) -> float:
     if sigma <= 0:
         return 0.5

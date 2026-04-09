@@ -26,6 +26,7 @@ from kalshi_readout import (
     kalshi_host_from_values,
     load_strategy_env_map,
     pnl_btc_approx_cents,
+    pnl_vol_surface_cents,
     pnl_weather_cents,
     refresh_balance_cache,
     trading_mode_labels,
@@ -280,6 +281,8 @@ def _strategy_pnl(s: dict[str, Any]) -> tuple[int, str]:
     tables = set(sq.get("tables") or [])
     if "btc_sessions" in tables:
         return pnl_btc_approx_cents(db_path), "approx_logged_mids"
+    if "trade_outcomes" in tables:
+        return pnl_vol_surface_cents(db_path), "vol_surface_settlements"
     if "trades" in tables:
         return pnl_weather_cents(db_path), "realized_trades"
     return 0, ""
@@ -559,6 +562,24 @@ def _weather_snapshot_payload() -> dict[str, Any]:
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         }
     return weather_panel_snapshot.build_snapshot()
+
+
+@app.get("/api/strategies/{sid}/vol-surface-dashboard")
+def vol_surface_dashboard(sid: str) -> dict[str, Any]:
+    s = _strategy_by_id(sid)
+    if s.get("id") != "vol_surface":
+        raise HTTPException(
+            status_code=400, detail="Only the vol_surface strategy supports this endpoint"
+        )
+    repo = _REPO.resolve()
+    path_insert = str(repo)
+    if path_insert not in sys.path:
+        sys.path.insert(0, path_insert)
+    try:
+        from vol_surface_strategy.panel_snapshot import build_dashboard_payload
+    except ImportError as e:
+        return {"ok": False, "error": str(e)}
+    return build_dashboard_payload(repo)
 
 
 @app.get("/api/strategies/{sid}/weather-snapshot")

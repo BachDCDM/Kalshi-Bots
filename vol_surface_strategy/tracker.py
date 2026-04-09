@@ -139,11 +139,41 @@ def deployed_cents_total(portfolio_total_cents: int) -> tuple[int, float]:
     init_db()
     with _conn() as c:
         r = c.execute(
-            "SELECT COALESCE(SUM(deployed_cents), 0) FROM positions WHERE status IN ('order_resting','filled')"
+            "SELECT COALESCE(SUM(deployed_cents), 0) FROM positions WHERE status IN "
+            "('order_resting','position_active','filled')"
         ).fetchone()
         total = int(r[0] or 0)
     frac = total / portfolio_total_cents if portfolio_total_cents > 0 else 0.0
     return total, min(1.0, frac)
+
+
+def list_all_rows(limit: int = 200) -> list[PositionRow]:
+    """Recent tracker rows (for dashboard)."""
+    init_db()
+    lim = max(1, min(500, int(limit)))
+    with _conn() as c:
+        rows = c.execute(
+            f"SELECT * FROM positions ORDER BY updated_utc DESC LIMIT {lim}"
+        ).fetchall()
+    out: list[PositionRow] = []
+    for r in rows:
+        out.append(
+            PositionRow(
+                key=r["key"],
+                status=r["status"],
+                market_type=r["market_type"],
+                city_id=r["city_id"],
+                resolution_date=r["resolution_date"],
+                hour_start_utc=r["hour_start_utc"],
+                order_id=r["order_id"],
+                ticker=r["ticker"],
+                side=r["side"],
+                entry_cents=r["entry_cents"],
+                contracts=r["contracts"],
+                deployed_cents=int(r["deployed_cents"] or 0),
+            )
+        )
+    return out
 
 
 def list_btc_resting() -> list[sqlite3.Row]:

@@ -407,6 +407,15 @@ def _log_btc_session_row(
     success = _compute_session_success(session, entry_fills, exit_f)
     hour_utc = ended.astimezone(timezone.utc).hour
 
+    realized_pnl_cents: Optional[int] = None
+    if session.exit_handled and exit_f > 0:
+        if yes_f > 0 and no_f <= 0:
+            n = min(float(yes_f), float(exit_f))
+            realized_pnl_cents = int(round((exit_cents - entry_cents) * n))
+        elif no_f > 0 and yes_f <= 0:
+            n = min(float(no_f), float(exit_f))
+            realized_pnl_cents = int(round((exit_cents - entry_cents) * n))
+
     try:
         path = _trade_db_path()
         conn = sqlite3.connect(path, timeout=10)
@@ -418,6 +427,7 @@ def _log_btc_session_row(
             if cur.fetchone()[0] == 0:
                 for col_def in [
                     "exit_fill_count REAL",
+                    "realized_pnl_cents INTEGER",
                 ]:
                     try:
                         conn.execute(f"ALTER TABLE btc_sessions ADD COLUMN {col_def}")
@@ -425,6 +435,11 @@ def _log_btc_session_row(
                         pass
                 conn.execute("INSERT INTO _schema_v2_done VALUES (1)")
                 conn.commit()
+
+            try:
+                conn.execute("ALTER TABLE btc_sessions ADD COLUMN realized_pnl_cents INTEGER")
+            except sqlite3.OperationalError:
+                pass
 
             p1, p2, p3, p4 = _prev_four_success_columns(conn)
             conn.execute(
@@ -436,8 +451,8 @@ def _log_btc_session_row(
                     yes_entry_fills, no_entry_fills, exit_handled,
                     lowest_yes_mid_cents_first5, success,
                     prev1_success, prev2_success, prev3_success, prev4_success,
-                    exit_fill_count
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    exit_fill_count, realized_pnl_cents
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     ended.astimezone(timezone.utc).isoformat(),
@@ -457,6 +472,7 @@ def _log_btc_session_row(
                     p3,
                     p4,
                     exit_f,
+                    realized_pnl_cents,
                 ),
             )
             conn.commit()

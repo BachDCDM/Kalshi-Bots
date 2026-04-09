@@ -26,6 +26,16 @@ def main() -> None:
     )
     p.add_argument("--no-btc", action="store_true", help="With --scan-report: skip BTC hourly")
     p.add_argument(
+        "--btc-only",
+        action="store_true",
+        help="With --scan-report: BTC hourly only (no weather cities)",
+    )
+    p.add_argument(
+        "--btc-debug",
+        action="store_true",
+        help="With --scan-report: DEBUG logs + BTC ladder / monotone / gate2 dump",
+    )
+    p.add_argument(
         "--weather-pages",
         type=int,
         default=None,
@@ -40,6 +50,8 @@ def main() -> None:
             city_ids=city_ids,
             include_btc=not args.no_btc,
             weather_discovery_pages=args.weather_pages,
+            btc_only=args.btc_only,
+            btc_debug=args.btc_debug,
         )
         return
     if args.once:

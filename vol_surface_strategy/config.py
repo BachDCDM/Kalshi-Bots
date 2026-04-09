@@ -5,16 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-# --- BTC hourly discovery (override via env VOL_BTC_HOURLY_SERIES) ---
+# --- BTC hourly discovery ---
+# VOL_BTC_HOURLY_SERIES — series ticker (default KXBTC).
+# VOL_BTC_EVENT_TICKER — exact event_ticker if prefix matching is ambiguous.
+# VOL_BTC_CLOSE_TOLERANCE_SECS — per-contract resolve time must be within this many seconds of hour_end_utc (default 60).
+# VOL_BTC_NO_THRESHOLD_PREF=1 — do not drop -B range buckets when -T cumulative lines exist.
 DEFAULT_BTC_HOURLY_SERIES = "KXBTC"
+
+# --- Trading gates (vol surface runner) ---
+MIN_EDGE_CENTS = 5.0
+MAX_SPREAD_ENTRY_CENTS = 4.0  # YES_ask − YES_bid; abort if greater than this
 
 # --- Range-bucket weather (CDF still uses full ladder; these gate surface inputs only) ---
 # Marginal bucket mid must lie in this band for its derived threshold row to enter the surface.
 RANGE_BUCKET_RAW_MID_MIN_CENTS = 3.0
 RANGE_BUCKET_RAW_MID_MAX_CENTS = 97.0
-# Derived P(T≥K) mids for surface rows (wider than 5–95 when distribution is collapsed).
-RANGE_BUCKET_DERIVED_MID_MIN_CENTS = 3.0
-RANGE_BUCKET_DERIVED_MID_MAX_CENTS = 97.0
+# Derived P(T≥K) mids for surface rows (CDF tails can sit near 0% or 100%).
+RANGE_BUCKET_DERIVED_MID_MIN_CENTS = 0.5
+RANGE_BUCKET_DERIVED_MID_MAX_CENTS = 99.5
 
 # Weather liquidity gate (thin ladders; book depth is often <5k even when tradeable)
 WEATHER_GATE2_MIN_MID_VOL = 1000.0
@@ -50,6 +58,33 @@ def climatology_mean_high(city_id: str, month: int) -> float:
     return tab.get(m, tab.get(6, 70.0))
 
 
+# Mean daily minimum (°F) for μ* plausibility on LOW markets — offset from monthly mean high by typical diurnal range.
+_CLIM_LOW_OFFSET_F: dict[str, float] = {
+    "NYC": 19.0,
+    "CHI": 20.0,
+    "MIA": 11.0,
+    "AUS": 16.0,
+    "LAX": 14.0,
+    "PHL": 20.0,
+    "DEN": 16.0,
+    "PHX": 15.0,
+    "MSP": 19.0,
+    "BNA": 17.0,
+    "MSY": 14.0,
+    "OKC": 17.0,
+    "SAT": 16.0,
+    "TPA": 12.0,
+}
+
+
+def climatology_mean_low(city_id: str, month: int) -> float:
+    """Rough monthly mean daily minimum (°F) for LOW-temperature μ* checks."""
+    m = max(1, min(12, month))
+    high = climatology_mean_high(city_id, m)
+    off = _CLIM_LOW_OFFSET_F.get(city_id, 18.0)
+    return max(5.0, high - off)
+
+
 @dataclass(frozen=True)
 class CitySchedule:
     city_id: str
@@ -64,6 +99,7 @@ class CitySchedule:
     high_second: Optional[tuple[int, int]]  # None = no second scan
     high_cutoff: tuple[int, int]
     # Extra substrings for catalog discovery when series tickers are unknown (BNA/TPA, etc.).
+    # Also: VOL_WEATHER_SERIES_{CITY_ID}_HIGH / _LOW (e.g. VOL_WEATHER_SERIES_BNA_HIGH).
     discovery_blob_tokens: tuple[str, ...] = ()
 
 

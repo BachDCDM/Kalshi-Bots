@@ -24,6 +24,131 @@ def _dollars_to_cents(s: Any) -> Optional[int]:
         return None
 
 
+def _mget(m: Any, name: str) -> Any:
+    if isinstance(m, dict):
+        return m.get(name)
+    return getattr(m, name, None)
+
+
+def normalize_top_of_book_cents(val: Any) -> Optional[int]:
+    """
+    Kalshi list endpoints may return prices as integer cents (1–99) or decimal dollars (0.01–0.99).
+    Returns integer cents in [1, 99] or None.
+    """
+    if val is None or val == "":
+        return None
+    if isinstance(val, bool):
+        return None
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return None
+    if x <= 0:
+        return None
+    if x < 1.0:
+        c = int(round(x * 100))
+    else:
+        c = int(round(x))
+    if 1 <= c <= 99:
+        return c
+    return None
+
+
+def get_yes_ask_cents(m: Any) -> Optional[int]:
+    for field in ("yes_ask", "yes_ask_price", "best_yes_ask", "ask_yes", "ask"):
+        c = normalize_top_of_book_cents(_mget(m, field))
+        if c is not None:
+            return c
+    d = _dollars_to_cents(_mget(m, "yes_ask_dollars"))
+    if d is not None and 1 <= d <= 99:
+        return int(d)
+    return None
+
+
+def get_yes_bid_cents(m: Any) -> Optional[int]:
+    for field in ("yes_bid", "yes_bid_price", "best_yes_bid", "bid_yes"):
+        c = normalize_top_of_book_cents(_mget(m, field))
+        if c is not None:
+            return c
+    d = _dollars_to_cents(_mget(m, "yes_bid_dollars"))
+    if d is not None and 1 <= d <= 99:
+        return int(d)
+    return None
+
+
+def get_no_ask_cents(m: Any) -> Optional[int]:
+    for field in ("no_ask", "no_ask_price", "best_no_ask", "ask_no"):
+        c = normalize_top_of_book_cents(_mget(m, field))
+        if c is not None:
+            return c
+    d = _dollars_to_cents(_mget(m, "no_ask_dollars"))
+    if d is not None and 1 <= d <= 99:
+        return int(d)
+    return None
+
+
+def get_no_bid_cents(m: Any) -> Optional[int]:
+    for field in ("no_bid", "no_bid_price", "best_no_bid", "bid_no"):
+        c = normalize_top_of_book_cents(_mget(m, field))
+        if c is not None:
+            return c
+    d = _dollars_to_cents(_mget(m, "no_bid_dollars"))
+    if d is not None and 1 <= d <= 99:
+        return int(d)
+    return None
+
+
+_BTC_USD_RANGE_RE = re.compile(
+    r"\$?\s*([\d,]+(?:\.\d+)?)\s*(?:to|-|–)\s*\$?\s*([\d,]+(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _parse_usd_num_token(tok: str) -> float:
+    return float(tok.replace(",", "").replace("$", "").strip())
+
+
+def parse_btc_bucket_text(blob: str) -> tuple[Optional[float], Optional[float], BucketMode]:
+    """Parse BTC hourly copy like \"$71,300 to 71,399.99\" or \"… or above\"."""
+    if not blob:
+        return None, None, "unknown"
+    low_s = blob.lower()
+    if "or above" in low_s or "or higher" in low_s:
+        m = re.search(
+            r"\$?\s*([\d,]+(?:\.\d+)?)\s*(?:or above|or higher)",
+            blob,
+            re.I,
+        )
+        if m:
+            return _parse_usd_num_token(m.group(1)), None, "above"
+    m = _BTC_USD_RANGE_RE.search(blob)
+    if m:
+        return (
+            _parse_usd_num_token(m.group(1)),
+            _parse_usd_num_token(m.group(2)),
+            "range",
+        )
+    return None, None, "unknown"
+
+
+def parse_btc_bucket_from_market(m: Any) -> tuple[Optional[float], Optional[float], BucketMode]:
+    """Prefer API floor/cap when present; else subtitle/title text."""
+    fl_raw = getattr(m, "floor_strike", None)
+    cap_raw = getattr(m, "cap_strike", None)
+    if fl_raw not in (None, "") and cap_raw not in (None, ""):
+        try:
+            fl, cap = float(fl_raw), float(cap_raw)
+            if cap > fl:
+                return fl, cap, "range"
+        except (TypeError, ValueError):
+            pass
+    blob = " ".join(
+        str(getattr(m, a, "") or "")
+        for a in ("yes_sub_title", "subtitle", "title", "no_sub_title")
+    )
+    return parse_btc_bucket_text(blob)
+
+
 def extract_strike_btc(m: Any) -> Optional[float]:
     for attr in ("floor_strike", "cap_strike", "functional_strike"):
         v = getattr(m, attr, None)
@@ -104,18 +229,23 @@ def extract_strike_weather(m: Any) -> Optional[float]:
 
 def _yes_no_book_cents(m: Any) -> tuple[Optional[float], Optional[float], bool]:
     """
-    YES bid/ask in cents. When the API omits YES bid but lists NO ask, use YES bid = 100 − NO ask;
+    YES bid/ask in cents. Resolves several Kalshi field names and cent vs dollar scalars.
+
+    When the API omits YES bid but lists NO ask, use YES bid = 100 − NO ask;
     same for YES ask from NO bid. If YES bid is still missing but YES ask exists, flag one-sided
     (mid = YES ask / 2 in :func:`contract_from_market`).
     """
-    yb = _dollars_to_cents(getattr(m, "yes_bid_dollars", None))
-    ya = _dollars_to_cents(getattr(m, "yes_ask_dollars", None))
-    no_ask = _dollars_to_cents(getattr(m, "no_ask_dollars", None))
-    no_bid = _dollars_to_cents(getattr(m, "no_bid_dollars", None))
-    if yb is None and no_ask is not None:
-        yb = 100.0 - float(no_ask)
-    if ya is None and no_bid is not None:
-        ya = 100.0 - float(no_bid)
+    ya_i = get_yes_ask_cents(m)
+    yb_i = get_yes_bid_cents(m)
+    no_ask_i = get_no_ask_cents(m)
+    no_bid_i = get_no_bid_cents(m)
+
+    yb: Optional[float] = float(yb_i) if yb_i is not None else None
+    ya: Optional[float] = float(ya_i) if ya_i is not None else None
+    if yb is None and no_ask_i is not None:
+        yb = 100.0 - float(no_ask_i)
+    if ya is None and no_bid_i is not None:
+        ya = 100.0 - float(no_bid_i)
     if ya is None:
         return None, None, False
     if yb is None:
@@ -138,7 +268,13 @@ def contract_from_market(m: Any, *, kind: str) -> Optional[ContractInput]:
     bh: Optional[float] = None
     bm: BucketMode = "unknown"
     if kind == "btc":
-        k = extract_strike_btc(m)
+        bl, bh, bm = parse_btc_bucket_from_market(m)
+        if bm == "range" and bl is not None and bh is not None:
+            k = float(bl)
+        elif bm == "above" and bl is not None:
+            k = float(bl) + 0.001
+        else:
+            k = extract_strike_btc(m)
     else:
         # Prefer subtitle lines: full title often contains a year (e.g. 2026) that breaks digit regexes.
         sub = str(getattr(m, "subtitle", "") or "").strip()

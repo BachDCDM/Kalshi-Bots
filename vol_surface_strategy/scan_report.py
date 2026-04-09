@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from vol_surface_strategy.analysis import ScanResult, run_scan
+from vol_surface_strategy.analysis import ScanResult, btc_pipeline_debug_lines, run_scan
 from vol_surface_strategy.config import CITIES, DEFAULT_BTC_HOURLY_SERIES
 from vol_surface_strategy.discovery import (
     discover_btc_hourly_markets,
@@ -18,6 +19,7 @@ from vol_surface_strategy.discovery import (
     resolution_date_for_low_scan,
 )
 from vol_surface_strategy.kalshi_io import load_client, portfolio_total_cents
+from vol_surface_strategy.logutil import setup_logging
 from vol_surface_strategy.market_utils import contract_from_market
 from vol_surface_strategy.tracker import deployed_cents_total, init_db
 
@@ -38,18 +40,24 @@ _REASON_HINT: dict[str, str] = {
     "no_sigma_star": "No median σ from anchor pairs",
     "plausibility_sigma": "σ* outside plausible band",
     "underlying": "Could not estimate μ / S*",
-    "plausibility_mu": "μ* vs climatology failed",
+    "plausibility_mu": "μ* vs climatology: HIGH ±30°F; LOW vs climatology_low with −12°F / +30°F (asymmetric)",
     "plausibility_S": "S* vs ATM proxy failed (BTC)",
+    "implied_S_far_from_ATM": "BTC CDF: S* >2×bucket width from highest-mid (ATM) bucket center",
     "plausibility_bucket_mass": "Model interval masses do not sum to ~1",
     "reverse_map_fail": "Could not map derived outlier to a bucket",
-    "below_edge_threshold": "|edge| below minimum for regime",
+    "below_edge_threshold": "Limit-order edge below universal 5¢ minimum",
+    "spread_too_wide": "YES bid–ask spread > 4¢ on entry contract — hard gate",
     "edge_unstable": "Edge sign flips under σ perturbation",
-    "gate5_spread": "YES bid–ask spread too wide",
+    "gate5_spread": "(legacy) spread gate; superseded by spread_too_wide >4¢",
+    "btc_bucket_edge_fail": "Could not score BTC range buckets vs lognormal interval fair values",
+    "btc_bucket_bounds": "Chosen BTC bucket missing bucket_low/bucket_high",
+    "btc_trade_validation": "Assertion failed: trade must be real -B bucket at book-derived entry",
     "gate4_no_ask": "No valid NO price for entry",
     "gate4_yes_ask": "No valid YES price for entry",
     "kelly_nonpositive": "Kelly fraction non-positive",
     "zero_contracts": "Rounded position size is zero",
     "market_classification": "Could not classify weather ladder / CDF failed",
+    "incoherent_bucket_mids": "Marginal YES mids sum to >115% (stale/inconsistent book)",
 }
 
 
@@ -186,20 +194,34 @@ def run_scan_report(
     city_ids: Optional[list[str]] = None,
     include_btc: bool = True,
     weather_discovery_pages: Optional[int] = None,
+    btc_only: bool = False,
+    btc_debug: bool = False,
 ) -> None:
     """
     weather_discovery_pages: None → env SCAN_REPORT_WEATHER_PAGES; if unset, full catalog (like runner).
     0 → full catalog.  N>0 → cap at N pages (faster, may find zero weather markets).
+    btc_only: skip all weather cities; run BTC hourly only.
+    btc_debug: set DEBUG logging and print ladder / monotone / gate2 breakdown for BTC.
     """
+    if btc_only and not include_btc:
+        print("[error] --btc-only requires BTC (omit --no-btc)", file=sys.stderr)
+        return
+
+    log_level = logging.DEBUG if btc_debug else logging.INFO
+    setup_logging(level=log_level)
     init_db()
     client = load_client()
     now_utc = datetime.now(timezone.utc)
     total_pf = portfolio_total_cents(client)
     _, dep_frac = deployed_cents_total(total_pf)
 
-    cities = city_ids if city_ids is not None else list(CITIES.keys())
+    if btc_only:
+        cities: list[str] = []
+    else:
+        cities = city_ids if city_ids is not None else list(CITIES.keys())
 
-    print("Vol surface — scan-all report (read-only, no orders)")
+    title = "Vol surface — BTC-only debug" if btc_only else "Vol surface — scan-all report (read-only, no orders)"
+    print(title)
     print(f"Now (UTC): {now_utc.isoformat()}")
     print(f"Portfolio: ${total_pf/100:,.2f}  deployed_frac={dep_frac:.3f}")
     if weather_discovery_pages is None:
@@ -208,11 +230,17 @@ def run_scan_report(
         wlim = None
     else:
         wlim = weather_discovery_pages
-    print(f"Cities ({len(cities)}): {', '.join(cities)}")
+    if btc_only:
+        print("Weather: skipped (--btc-only)")
+    else:
+        print(f"Cities ({len(cities)}): {', '.join(cities)}")
     print(f"Include BTC hourly: {include_btc}")
-    wp_disp = "full catalog (same as live runner)" if wlim is None else f"max {wlim} page(s)"
-    print(f"Weather discovery: {wp_disp} (~200 markets/page).")
-    print("  Tip: export SCAN_REPORT_WEATHER_PAGES=40 for a faster partial scan (may miss cities).")
+    if not btc_only:
+        wp_disp = "full catalog (same as live runner)" if wlim is None else f"max {wlim} page(s)"
+        print(f"Weather discovery: {wp_disp} (~200 markets/page).")
+        print("  Tip: export SCAN_REPORT_WEATHER_PAGES=40 for a faster partial scan (may miss cities).")
+    if btc_debug:
+        print("BTC debug: logging level DEBUG; full ladder dump below.")
 
     if include_btc:
         hour_start = now_utc.replace(minute=0, second=0, microsecond=0)
@@ -239,6 +267,10 @@ def run_scan_report(
                 deployed_fraction=dep_frac,
             )
             _print_scan_block(title, sub, markets, len(raw), res)
+            if btc_debug:
+                print()
+                for ln in btc_pipeline_debug_lines(raw):
+                    print(ln)
 
     for cid in cities:
         if cid not in CITIES:
@@ -289,6 +321,7 @@ def run_scan_report(
                 t_resolve=t_resolve,
                 now=now_utc,
                 city_id=cid,
+                weather_temp_kind=kind if kind in ("HIGH", "LOW") else None,
                 portfolio_cents=total_pf,
                 deployed_fraction=dep_frac,
             )
@@ -296,7 +329,7 @@ def run_scan_report(
 
     print()
     print("=" * 88)
-    print("End of report.")
+    print("End of report." + (" (BTC-only)" if btc_only else ""))
     print("=" * 88)
 
 
@@ -310,6 +343,16 @@ def main() -> None:
     )
     p.add_argument("--no-btc", action="store_true", help="Skip BTC hourly scan.")
     p.add_argument(
+        "--btc-only",
+        action="store_true",
+        help="Only run BTC hourly (skip all weather); pair with --btc-debug for ladder dump.",
+    )
+    p.add_argument(
+        "--btc-debug",
+        action="store_true",
+        help="DEBUG logs + print strike/mid/monotone/gate2 breakdown for BTC after scan.",
+    )
+    p.add_argument(
         "--weather-pages",
         type=int,
         default=None,
@@ -322,6 +365,8 @@ def main() -> None:
         city_ids=city_ids,
         include_btc=not args.no_btc,
         weather_discovery_pages=args.weather_pages,
+        btc_only=args.btc_only,
+        btc_debug=args.btc_debug,
     )
 
 

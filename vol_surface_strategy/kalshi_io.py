@@ -75,20 +75,29 @@ def get_markets_page_raw(
         kwargs["mve_filter"] = mve_filter
 
     delay = 2.0
-    for attempt in range(6):
+    max_attempts = 10
+    for attempt in range(max_attempts):
         try:
             raw_resp = client.get_markets_without_preload_content(**kwargs)
-            if getattr(raw_resp, "status", 200) != 200:
-                raise RuntimeError(f"get_markets HTTP {getattr(raw_resp, 'status', '?')}")
+            status_code = int(getattr(raw_resp, "status", 200) or 200)
+            # Raw urllib response uses status; 429 is common on long catalog scans — retry with backoff.
+            if status_code == 429:
+                if attempt < max_attempts - 1:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60.0)
+                    continue
+                raise RuntimeError("get_markets HTTP 429 (rate limited after retries)")
+            if status_code != 200:
+                raise RuntimeError(f"get_markets HTTP {status_code}")
             body = raw_resp.read()
             text = body if isinstance(body, str) else body.decode("utf-8")
             payload = json.loads(text)
             markets = [_bag(dict(m)) for m in (payload.get("markets") or []) if isinstance(m, dict)]
             return markets, str(payload.get("cursor") or "")
         except ApiException as e:
-            if getattr(e, "status", None) == 429 and attempt < 5:
+            if getattr(e, "status", None) == 429 and attempt < max_attempts - 1:
                 time.sleep(delay)
-                delay = min(delay * 2, 30)
+                delay = min(delay * 2, 60.0)
             else:
                 raise
     return [], ""
@@ -103,3 +112,24 @@ def portfolio_total_cents(client: KalshiClient) -> int:
 
     r = PortfolioApi(client).get_balance()
     return int(getattr(r, "balance", 0) or 0) + int(getattr(r, "portfolio_value", 0) or 0)
+
+
+def _fp(x: Any) -> float:
+    try:
+        return float(x or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def net_contracts_for_ticker(client: KalshiClient, ticker: str) -> float:
+    """Absolute net position size on a market ticker."""
+    r = client.get_positions(ticker=ticker, count_filter="position")
+    positions = getattr(r, "market_positions", None) or []
+    for p in positions:
+        if str(getattr(p, "ticker", "") or "") == ticker:
+            return abs(_fp(getattr(p, "position_fp", "0")))
+    return 0.0
+
+
+def fetch_order(client: KalshiClient, order_id: str) -> Any:
+    return client.get_order(order_id=order_id).order

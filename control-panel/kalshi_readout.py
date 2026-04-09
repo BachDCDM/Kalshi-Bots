@@ -90,6 +90,28 @@ def fetch_balance(client: KalshiClient) -> dict[str, Any]:
     }
 
 
+def pnl_vol_surface_cents(db_path: Path) -> int:
+    """Sum realized P&amp;L from vol surface ``trade_outcomes`` (settled rows)."""
+    if not db_path.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error:
+        conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        cur = conn.execute(
+            """
+            SELECT COALESCE(SUM(pnl_cents), 0) FROM trade_outcomes
+            WHERE status = 'resolved' AND pnl_cents IS NOT NULL
+            """
+        )
+        return int(cur.fetchone()[0] or 0)
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
 def pnl_weather_cents(db_path: Path) -> int:
     if not db_path.is_file():
         return 0
@@ -109,7 +131,11 @@ def pnl_weather_cents(db_path: Path) -> int:
 
 
 def pnl_btc_approx_cents(db_path: Path) -> int:
-    """Approximate Σ (exit-entry)×contracts for single-leg sessions (YES-mid based)."""
+    """
+    Realized P&amp;L in cents: prefer stored ``realized_pnl_cents`` per session (authoritative).
+    Otherwise estimate with (exit−entry) × min(entry_leg_fills, exit_fill_count) so fills
+    cannot inflate the multiplier.
+    """
     if not db_path.is_file():
         return 0
     p = db_path.resolve()
@@ -119,22 +145,46 @@ def pnl_btc_approx_cents(db_path: Path) -> int:
         conn = sqlite3.connect(str(p), timeout=30)
     try:
         cur = conn.execute(
-            """
-            SELECT COALESCE(SUM(
-                CASE
-                    WHEN yes_entry_fills > 0 AND COALESCE(no_entry_fills, 0) = 0
-                        THEN (COALESCE(exit_cents, 0) - COALESCE(entry_cents, 0)) * yes_entry_fills
-                    WHEN no_entry_fills > 0 AND COALESCE(yes_entry_fills, 0) = 0
-                        THEN (COALESCE(exit_cents, 0) - COALESCE(entry_cents, 0)) * no_entry_fills
-                    ELSE 0
-                END
-            ), 0)
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='btc_sessions'"
+        )
+        if not cur.fetchone():
+            return 0
+        cur = conn.execute("PRAGMA table_info(btc_sessions)")
+        cols = {row[1] for row in cur.fetchall()}
+        has_rpc = "realized_pnl_cents" in cols
+        has_ef = "exit_fill_count" in cols
+
+        cur = conn.execute(
+            f"""
+            SELECT
+                {"realized_pnl_cents" if has_rpc else "NULL"},
+                entry_cents, exit_cents,
+                yes_entry_fills, no_entry_fills,
+                {"exit_fill_count" if has_ef else "NULL"},
+                exit_handled
             FROM btc_sessions
-            WHERE exit_handled = 1
+            WHERE COALESCE(exit_handled, 0) = 1
             """
         )
-        row = cur.fetchone()
-        return int(round(float(row[0] or 0)))
+        total = 0
+        for row in cur.fetchall():
+            rpc, ec, xc, yf, nf, ef, _eh = row
+            if ec is None or xc is None:
+                continue
+            ec_i, xc_i = int(ec), int(xc)
+            if has_rpc and rpc is not None:
+                total += int(rpc)
+                continue
+            yf = float(yf or 0)
+            nf = float(nf or 0)
+            ef = float(ef or 0)
+            if yf > 0 and nf <= 0:
+                n = min(yf, ef if ef > 0 else yf)
+                total += int(round((xc_i - ec_i) * n))
+            elif nf > 0 and yf <= 0:
+                n = min(nf, ef if ef > 0 else nf)
+                total += int(round((xc_i - ec_i) * n))
+        return int(total)
     finally:
         conn.close()
 
