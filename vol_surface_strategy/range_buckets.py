@@ -6,6 +6,7 @@ from typing import Literal, Optional, Tuple
 
 from scipy import stats
 
+from vol_surface_strategy.config import yes_mid_tradeable
 from vol_surface_strategy.entry_edge import (
     edge_cents_limit_order,
     limit_entry_cents,
@@ -142,11 +143,12 @@ def reverse_map_to_bucket(
     mu: float,
     sigma: float,
     raw_sorted: list[ContractInput],
-) -> tuple[ContractInput, float, float, Literal["yes", "no"], int]:
+) -> Optional[tuple[ContractInput, float, float, Literal["yes", "no"], int]]:
     """
     Pick the real bucket with largest |edge| at limit price (best_ask − 1¢ on entry side).
     outlier_raw_bucket_idx indexes raw_sorted (same order as CDF build).
-    Returns (contract, p_fair_yes, edge_cents, side, entry_cents).
+    Only buckets with YES mid in yes_mid_tradeable() (excludes extreme tails).
+    Returns (contract, p_fair_yes, edge_cents, side, entry_cents) or None if none qualify.
     """
     n = len(raw_sorted)
     if n < 2:
@@ -167,6 +169,8 @@ def reverse_map_to_bucket(
         if j < 0 or j >= n:
             continue
         c = raw_sorted[j]
+        if not yes_mid_tradeable(c.mid_cents):
+            continue
         lo, hi = integration_extents_f(c)
         pf = fair_interval_prob(mu, sigma, lo, hi)
         m = c.mid_cents / 100.0
@@ -181,7 +185,6 @@ def reverse_map_to_bucket(
             best_abs = abs_e
             best_spread = spread
             best_out = (c, pf, edge, side, ent)
-    assert best_out is not None
     return best_out
 
 
@@ -317,6 +320,8 @@ def best_btc_bucket_trade_by_edge(
     for c in raw_sorted:
         if c.bucket_mode != "range" or c.bucket_low is None or c.bucket_high is None:
             continue
+        if not yes_mid_tradeable(c.mid_cents):
+            continue
         lo, hi = float(c.bucket_low), float(c.bucket_high)
         pf = fair_yes_lognormal_interval(s_star, lo, hi, sigma, t_years)
         m = c.mid_cents / 100.0
@@ -332,5 +337,5 @@ def best_btc_bucket_trade_by_edge(
             best_spread = spread
             best = (c, pf, edge, side, ent)
     if best is None:
-        raise ValueError("no BTC range buckets for edge scan")
+        raise ValueError("no BTC range buckets for edge scan (or none in YES-mid trade band)")
     return best

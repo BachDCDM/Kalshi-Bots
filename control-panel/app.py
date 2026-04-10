@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -21,6 +22,11 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
+from settlement_sync import (
+    get_ledger_pnl_by_strategy,
+    ledger_row_counts,
+    sync_settlements_once,
+)
 from btc15m_prefs import (
     MAX_CONTRACTS,
     MIN_CONTRACTS,
@@ -38,6 +44,8 @@ from kalshi_readout import (
     refresh_balance_cache,
     trading_mode_labels,
 )
+
+_LOG = logging.getLogger("kalshi.control_panel")
 
 _ROOT = Path(__file__).resolve().parent
 _REPO = Path(
@@ -261,6 +269,9 @@ def _resolve_db_path(rel: str) -> Path:
 
 
 HEARTBEAT_INTERVAL_SEC = 60
+SETTLEMENT_SYNC_INTERVAL_SEC = int(
+    os.environ.get("CONTROL_PANEL_SETTLEMENT_SYNC_SEC", "900")
+)
 
 
 def _balance_env_rel() -> str:
@@ -277,7 +288,20 @@ def _strategy_trading_mode(s: dict[str, Any]) -> tuple[str, str]:
     return trading_mode_labels(host)
 
 
-def _strategy_pnl(s: dict[str, Any]) -> tuple[int, str]:
+def _strategy_pnl(
+    s: dict[str, Any],
+    *,
+    ledger_pnl: Optional[dict[str, int]] = None,
+    ledger_counts: Optional[dict[str, int]] = None,
+) -> tuple[int, str]:
+    sid = str(s.get("id") or "")
+    if (
+        sid
+        and ledger_counts is not None
+        and ledger_pnl is not None
+        and ledger_counts.get(sid, 0) > 0
+    ):
+        return int(ledger_pnl.get(sid, 0)), "kalshi_settlements_ledger"
     sq = _sqlite_block(s)
     if not sq or not sq.get("path"):
         return 0, ""
@@ -302,19 +326,36 @@ async def _balance_heartbeat_loop() -> None:
         await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
 
 
+def _settlement_sync_job() -> None:
+    try:
+        sync_settlements_once(_REPO.resolve(), _load_strategies(), env_file=_balance_env_rel())
+    except Exception:
+        _LOG.exception("settlement sync failed")
+
+
+async def _settlement_sync_loop() -> None:
+    await asyncio.to_thread(_settlement_sync_job)
+    while True:
+        await asyncio.sleep(max(120, SETTLEMENT_SYNC_INTERVAL_SEC))
+        await asyncio.to_thread(_settlement_sync_job)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     envf = _balance_env_rel()
     await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
-    task = asyncio.create_task(_balance_heartbeat_loop())
+    bal_task = asyncio.create_task(_balance_heartbeat_loop())
+    st_task = asyncio.create_task(_settlement_sync_loop())
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        bal_task.cancel()
+        st_task.cancel()
+        for task in (bal_task, st_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -331,6 +372,9 @@ def health() -> dict[str, str]:
 
 @app.get("/api/strategies")
 def list_strategies() -> JSONResponse:
+    repo = _REPO.resolve()
+    ledger_pnl = get_ledger_pnl_by_strategy(repo)
+    ledger_n = ledger_row_counts(repo)
     out = []
     for s in _load_strategies():
         unit = s.get("systemd_unit", "")
@@ -342,7 +386,9 @@ def list_strategies() -> JSONResponse:
         sq = _sqlite_block(s)
         tables = list(sq["tables"]) if sq and sq.get("tables") else None
         mode_key, mode_label = _strategy_trading_mode(s)
-        pnl_cents, pnl_src = _strategy_pnl(s)
+        pnl_cents, pnl_src = _strategy_pnl(
+            s, ledger_pnl=ledger_pnl, ledger_counts=ledger_n
+        )
         out.append(
             {
                 "id": s.get("id"),
@@ -358,6 +404,7 @@ def list_strategies() -> JSONResponse:
                 "trading_mode_label": mode_label,
                 "pnl_cents": pnl_cents,
                 "pnl_source": pnl_src,
+                "settlement_ledger_rows": ledger_n.get(str(s.get("id") or ""), 0),
             }
         )
     return JSONResponse(out)
@@ -366,6 +413,9 @@ def list_strategies() -> JSONResponse:
 @app.get("/api/overview")
 def overview() -> dict[str, Any]:
     cache = get_balance_cache()
+    repo = _REPO.resolve()
+    ledger_pnl = get_ledger_pnl_by_strategy(repo)
+    ledger_n = ledger_row_counts(repo)
     rows: list[dict[str, Any]] = []
     total_pnl = 0
     for s in _load_strategies():
@@ -373,7 +423,9 @@ def overview() -> dict[str, Any]:
         if not sid:
             continue
         mode_key, mode_label = _strategy_trading_mode(s)
-        pnl, pnl_src = _strategy_pnl(s)
+        pnl, pnl_src = _strategy_pnl(
+            s, ledger_pnl=ledger_pnl, ledger_counts=ledger_n
+        )
         total_pnl += pnl
         rows.append(
             {
@@ -383,6 +435,7 @@ def overview() -> dict[str, Any]:
                 "trading_mode_label": mode_label,
                 "pnl_cents": pnl,
                 "pnl_source": pnl_src,
+                "settlement_ledger_rows": ledger_n.get(str(sid), 0),
             }
         )
     bal_vals = load_strategy_env_map(_REPO, _balance_env_rel())
@@ -400,6 +453,14 @@ def overview() -> dict[str, Any]:
         "strategies": rows,
         "total_pnl_cents": total_pnl,
     }
+
+
+@app.post("/api/sync-settlements")
+def trigger_settlement_sync() -> dict[str, Any]:
+    """Pull Kalshi settlements into the local ledger (same job as the periodic sync)."""
+    return sync_settlements_once(
+        _REPO.resolve(), _load_strategies(), env_file=_balance_env_rel()
+    )
 
 
 @app.post("/api/strategies/{sid}/start")

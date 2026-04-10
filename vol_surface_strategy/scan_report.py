@@ -46,6 +46,7 @@ _REASON_HINT: dict[str, str] = {
     "plausibility_bucket_mass": "Model interval masses do not sum to ~1",
     "reverse_map_fail": "Could not map derived outlier to a bucket",
     "below_edge_threshold": "Limit-order edge below universal 5¢ minimum",
+    "mid_tail_band": "No tradeable contract: YES mid outside 13–87¢ band (tails deferred)",
     "spread_too_wide": "YES bid–ask spread > 4¢ on entry contract — hard gate",
     "edge_unstable": "Edge sign flips under σ perturbation",
     "gate5_spread": "(legacy) spread gate; superseded by spread_too_wide >4¢",

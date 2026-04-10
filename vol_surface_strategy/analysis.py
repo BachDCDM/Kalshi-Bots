@@ -13,11 +13,14 @@ from vol_surface_strategy.config import (
     RANGE_BUCKET_DERIVED_MID_MIN_CENTS,
     RANGE_BUCKET_RAW_MID_MAX_CENTS,
     RANGE_BUCKET_RAW_MID_MIN_CENTS,
+    TRADE_YES_MID_MAX_CENTS,
+    TRADE_YES_MID_MIN_CENTS,
     WEATHER_GATE2_MIN_BOOK_SZ,
     WEATHER_GATE2_MIN_MID_VOL,
     WEATHER_GATE2_MIN_VOL_FP,
     climatology_mean_high,
     climatology_mean_low,
+    yes_mid_tradeable,
 )
 from vol_surface_strategy.entry_edge import (
     edge_cents_limit_order,
@@ -726,7 +729,25 @@ def run_scan(
             real_c, p_fair_b, edge, side_btc, entry_btc = best_btc_bucket_trade_by_edge(
                 und, sig_star, t_years, raw_sorted_map
             )
-        except ValueError:
+        except ValueError as e:
+            if "YES-mid" in str(e) or "trade band" in str(e):
+                return ScanResult(
+                    False,
+                    "abort",
+                    "mid_tail_band",
+                    model=model,
+                    contracts=c1,
+                    outlier_idx=outlier_idx,
+                    sigma_star=sig_star,
+                    underlying=und,
+                    gate_log=gate_log
+                    + [
+                        f"BTC range buckets: none in YES-mid band "
+                        f"({TRADE_YES_MID_MIN_CENTS:.0f}–{TRADE_YES_MID_MAX_CENTS:.0f}¢)"
+                    ],
+                    weather_market_type=weather_mt,
+                    from_range_buckets=True,
+                )
             return ScanResult(
                 False,
                 "abort",
@@ -834,9 +855,7 @@ def run_scan(
         out_raw = c1[outlier_idx].source_raw_index
         src_idx = out_raw if out_raw is not None else outlier_idx
         try:
-            real_c, p_fair_b, edge, side_r, entry_r = reverse_map_to_bucket(
-                src_idx, und, sig_star, raw_sorted_map
-            )
+            mapped = reverse_map_to_bucket(src_idx, und, sig_star, raw_sorted_map)
         except ValueError:
             return ScanResult(
                 False,
@@ -847,6 +866,25 @@ def run_scan(
                 weather_market_type=weather_mt,
                 from_range_buckets=True,
             )
+        if mapped is None:
+            return ScanResult(
+                False,
+                "abort",
+                "mid_tail_band",
+                model=model,
+                contracts=c1,
+                outlier_idx=outlier_idx,
+                sigma_star=sig_star,
+                underlying=und,
+                gate_log=gate_log
+                + [
+                    f"range neighbors outside YES-mid band "
+                    f"({TRADE_YES_MID_MIN_CENTS:.0f}–{TRADE_YES_MID_MAX_CENTS:.0f}¢)"
+                ],
+                weather_market_type=weather_mt,
+                from_range_buckets=True,
+            )
+        real_c, p_fair_b, edge, side_r, entry_r = mapped
 
         anchor_vols = [
             raw_sorted_map[i].volume_fp for i in range(len(raw_sorted_map)) if i != src_idx
@@ -918,42 +956,56 @@ def run_scan(
         side = side_r
         entry = entry_r
     else:
-        out_c = c1[outlier_idx]
-        if model == "lognormal":
-            p_fair = fair_yes_lognormal(und, out_c.strike, sig_star, t_years)
-        else:
-            p_fair = fair_yes_normal(und, out_c.strike, sig_star)
-        mid_yes = out_c.mid_cents / 100.0
-        side = trade_side_from_mid_vs_fair(mid_yes, p_fair)
-        ent = limit_entry_cents(side, out_c)
-        if ent is None:
-            if side == "no":
-                return ScanResult(False, "abort", "gate4_no_ask", gate_log=gate_log)
-            return ScanResult(False, "abort", "gate4_yes_ask", gate_log=gate_log)
-        edge = edge_cents_limit_order(side, p_fair, ent)
-
-        anchor_vols = [c1[i].volume_fp for i in range(n) if i != outlier_idx]
-        low_anchor = any(_volume_dollars(c1[i]) < 1000 for i in range(n) if i != outlier_idx)
-
-        if spread_blocks_entry(out_c):
-            sy = yes_spread_cents(out_c)
+        # Threshold path: among contracts with YES mid in (tail) band, pick largest |edge|, then gates.
+        loo_idx = outlier_idx
+        scored: list[tuple[float, float, int, Any, float, Side, int, float]] = []
+        for i in range(n):
+            c = c1[i]
+            if not yes_mid_tradeable(c.mid_cents):
+                continue
+            if model == "lognormal":
+                p_fair_i = fair_yes_lognormal(und, c.strike, sig_star, t_years)
+            else:
+                p_fair_i = fair_yes_normal(und, c.strike, sig_star)
+            mid_yes = c.mid_cents / 100.0
+            side_i = trade_side_from_mid_vs_fair(mid_yes, p_fair_i)
+            ent_i = limit_entry_cents(side_i, c)
+            if ent_i is None:
+                continue
+            edge_i = edge_cents_limit_order(side_i, p_fair_i, ent_i)
+            if spread_blocks_entry(c):
+                continue
+            abs_e = abs(edge_i)
+            spread_v = float(c.yes_ask_cents - c.yes_bid_cents)
+            scored.append((abs_e, spread_v, i, c, p_fair_i, side_i, ent_i, edge_i))
+        if not scored:
             return ScanResult(
                 False,
                 "abort",
-                "spread_too_wide",
+                "mid_tail_band",
                 model=model,
                 contracts=c1,
-                outlier_idx=outlier_idx,
-                outlier_ticker=out_c.ticker,
+                outlier_idx=loo_idx,
                 sigma_star=sig_star,
                 underlying=und,
-                p_fair_yes=p_fair,
-                edge_cents=edge,
-                gate_log=gate_log + [f"spread_too_wide spread={sy:.0f}¢ on {out_c.ticker}"],
-                low_anchor_volume_flag=low_anchor,
+                gate_log=gate_log
+                + [
+                    f"no threshold contract in YES-mid band "
+                    f"({TRADE_YES_MID_MIN_CENTS:.0f}–{TRADE_YES_MID_MAX_CENTS:.0f}¢)"
+                ],
                 weather_market_type=weather_mt,
                 from_range_buckets=from_range,
             )
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        abs_e_pick, _spr, trade_i, out_c, p_fair, side, ent, edge = scored[0]
+        outlier_idx = trade_i
+        gate_log = gate_log + [
+            f"picked_contract idx={trade_i} |edge|={abs_e_pick:.2f}¢ "
+            f"(best among YES-mid∈[{TRADE_YES_MID_MIN_CENTS:.0f},{TRADE_YES_MID_MAX_CENTS:.0f}]¢)"
+        ]
+
+        anchor_vols = [c1[i].volume_fp for i in range(n) if i != loo_idx]
+        low_anchor = any(_volume_dollars(c1[i]) < 1000 for i in range(n) if i != loo_idx)
 
         if abs(edge) < MIN_EDGE_CENTS:
             return ScanResult(

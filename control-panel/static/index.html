@@ -104,6 +104,7 @@ function fmtCents(c) {
 function pnlCaption(src) {
   if (src === 'realized_trades') return 'realized (DB)';
   if (src === 'approx_logged_mids') return 'per-session realized (DB)';
+  if (src === 'kalshi_settlements_ledger') return 'Kalshi settlement ledger (API sync)';
   if (src === 'vol_surface_settlements') return 'resolved settlements (panel DB)';
   return 'logged';
 }

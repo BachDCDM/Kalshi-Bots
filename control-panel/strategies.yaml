@@ -30,9 +30,12 @@ strategies:
         - trades
         - errors
 
+  # Optional: settlement_prefixes (uppercase ok) — first strategy match wins.
+  # Use to send weather tickers to vol_surface instead of the default weather bucket.
   - id: vol_surface
     title: "Vol surface (BTC hourly + weather)"
     systemd_unit: kalshi-vol-surface.service
+    settlement_prefixes: []
     data:
       type: mixed
       journal_lines: 500

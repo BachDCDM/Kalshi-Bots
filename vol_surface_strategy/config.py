@@ -15,6 +15,15 @@ DEFAULT_BTC_HOURLY_SERIES = "KXBTC"
 # --- Trading gates (vol surface runner) ---
 MIN_EDGE_CENTS = 5.0
 MAX_SPREAD_ENTRY_CENTS = 4.0  # YES_ask − YES_bid; abort if greater than this
+# Skip contracts whose YES mid sits in the extreme tails; pick next-best edge in-band first.
+TRADE_YES_MID_MIN_CENTS = 13.0
+TRADE_YES_MID_MAX_CENTS = 87.0
+
+
+def yes_mid_tradeable(mid_cents: float) -> bool:
+    """True if YES midpoint (¢) is in the tradeable band (avoids ~0.13 / ~0.87 implied tails)."""
+    m = float(mid_cents)
+    return TRADE_YES_MID_MIN_CENTS <= m <= TRADE_YES_MID_MAX_CENTS
 
 # --- Range-bucket weather (CDF still uses full ladder; these gate surface inputs only) ---
 # Marginal bucket mid must lie in this band for its derived threshold row to enter the surface.
