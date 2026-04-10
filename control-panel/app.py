@@ -296,25 +296,36 @@ def _strategy_pnl(
     ledger_counts: Optional[dict[str, int]] = None,
 ) -> tuple[int, str]:
     sid = str(s.get("id") or "")
+    sq = _sqlite_block(s)
+    db_path: Optional[Path] = None
+    tables: set[str] = set()
+    if sq and sq.get("path"):
+        try:
+            db_path = _resolve_db_path(str(sq["path"]))
+            tables = set(sq.get("tables") or [])
+        except HTTPException:
+            db_path = None
+
+    # BTC 15m: same realized P&L source as vol surface (trade_outcomes), not settlement ledger.
+    skip_ledger = sid == "btc15m" and "trade_outcomes" in tables
     if (
         sid
+        and not skip_ledger
         and ledger_counts is not None
         and ledger_pnl is not None
         and ledger_counts.get(sid, 0) > 0
     ):
         return int(ledger_pnl.get(sid, 0)), "kalshi_settlements_ledger"
-    sq = _sqlite_block(s)
-    if not sq or not sq.get("path"):
+
+    if not db_path:
         return 0, ""
-    try:
-        db_path = _resolve_db_path(str(sq["path"]))
-    except HTTPException:
-        return 0, ""
-    tables = set(sq.get("tables") or [])
+
+    if "trade_outcomes" in tables:
+        cents = pnl_vol_surface_cents(db_path)
+        src = "trade_outcomes" if sid == "btc15m" else "vol_surface_settlements"
+        return cents, src
     if "btc_sessions" in tables:
         return pnl_btc_approx_cents(db_path), "approx_logged_mids"
-    if "trade_outcomes" in tables:
-        return pnl_vol_surface_cents(db_path), "vol_surface_settlements"
     if "trades" in tables:
         return pnl_weather_cents(db_path), "realized_trades"
     return 0, ""

@@ -20,6 +20,7 @@ from vol_surface_strategy.trading_windows import (
     minutes_until_weather_high_end,
     minutes_until_weather_low_end,
     normalize_tracker_status,
+    resting_order_expiration_ts,
     weather_high_in_window,
     weather_high_should_monitor,
     weather_low_in_window,
@@ -61,7 +62,9 @@ def _describe_market_window(
     if market_type == "btc_hourly":
         in_w = btc_in_trading_window(utc)
         t_rem = minutes_until_btc_hour_end(utc)
-        exp = btc_order_expiration_ts(utc)
+        exp = resting_order_expiration_ts(
+            utc, latest_allowed_ts=btc_order_expiration_ts(utc)
+        )
         next_open = None
         if not in_w and utc.minute < 5:
             next_open = "Opens :05 UTC this hour"
@@ -76,7 +79,8 @@ def _describe_market_window(
             "monitor_tick": btc_should_monitor(utc),
             "minutes_to_hour_end": round(t_rem, 1),
             "order_expiration_ts": exp,
-            "window_hint": "UTC :05–:40 scan; :45 cancel" + (" · active now" if in_w else ""),
+            "window_hint": "UTC :05–:40 scan; limits ~4m TTL (or :45 if sooner)"
+            + (" · active now" if in_w else ""),
             "next_window_hint": next_open or ("Active" if in_w else ""),
         }
 

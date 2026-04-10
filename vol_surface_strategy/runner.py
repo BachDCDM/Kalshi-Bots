@@ -36,6 +36,7 @@ from vol_surface_strategy.trading_windows import (
     minutes_until_weather_high_end,
     minutes_until_weather_low_end,
     normalize_tracker_status,
+    resting_order_expiration_ts,
     weather_high_close_tick,
     weather_high_in_window,
     weather_high_should_monitor,
@@ -356,7 +357,9 @@ def _btc_monitor_cycle(client: Any, dry_run: bool, now_utc: datetime) -> None:
                     cancel_order(client, oid)
                 except Exception as e:
                     LOG.warning("BTC cancel repricing %s: %s", oid, e)
-            exp = btc_order_expiration_ts(now_utc)
+            exp = resting_order_expiration_ts(
+                now_utc, latest_allowed_ts=btc_order_expiration_ts(now_utc)
+            )
             action = "order_updated"
             if dry_run:
                 LOG.info("DRY_RUN would replace BTC order %s x%d @ %d", res.side, res.contracts_to_buy, res.entry_cents)
@@ -412,7 +415,9 @@ def _btc_monitor_cycle(client: Any, dry_run: bool, now_utc: datetime) -> None:
 
     # window_open: post if trade
     if res.action == "trade" and res.side and res.entry_cents and res.contracts_to_buy:
-        exp = btc_order_expiration_ts(now_utc)
+        exp = resting_order_expiration_ts(
+            now_utc, latest_allowed_ts=btc_order_expiration_ts(now_utc)
+        )
         if dry_run:
             LOG.info("DRY_RUN would place BTC %s x%d @ %d", res.side, res.contracts_to_buy, res.entry_cents)
             action = "order_posted"
@@ -555,10 +560,13 @@ def _weather_monitor_cycle(
     _panel_record_scan(key, res)
 
     fill_check = "unfilled"
-    exp_ts = (
-        weather_high_order_expiration_ts(res_date, city_id)
-        if kind == "HIGH"
-        else weather_low_order_expiration_ts(res_date, city_id)
+    exp_ts = resting_order_expiration_ts(
+        now_utc,
+        latest_allowed_ts=(
+            weather_high_order_expiration_ts(res_date, city_id)
+            if kind == "HIGH"
+            else weather_low_order_expiration_ts(res_date, city_id)
+        ),
     )
 
     if st == "order_resting" and row and row.order_id and row.ticker:

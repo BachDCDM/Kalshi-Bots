@@ -1,4 +1,4 @@
-"""Place maker orders with expiration_ts."""
+"""Place maker orders; ``expiration_ts`` is set by the runner (short TTL + window cap)."""
 
 from __future__ import annotations
 

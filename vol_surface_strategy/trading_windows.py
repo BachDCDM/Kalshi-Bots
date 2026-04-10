@@ -13,6 +13,9 @@ from vol_surface_strategy.config import CITIES
 # --- BTC hourly (UTC): monitor at minutes 5..40; cancel at :45; no activity before :05 or after :45 ---
 BTC_MONITOR_MINUTES_UTC = frozenset({5, 10, 15, 20, 25, 30, 35, 40})
 
+# Resting limit orders: expire soon so stale edges do not fill after conditions move.
+ORDER_RESTING_TTL_MINUTES = 4
+
 
 @dataclass(frozen=True)
 class LocalHM:
@@ -112,13 +115,26 @@ def btc_close_tick(utc_dt: datetime) -> bool:
 
 
 def btc_order_expiration_ts(utc_dt: datetime) -> int:
-    """Minute 45 of the current hour (UTC)."""
+    """Latest allowed order expiry: minute 45 of the current hour (UTC)."""
     base = utc_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
     exp = base.replace(minute=45)
     return int(exp.timestamp())
 
 
+def resting_order_expiration_ts(now_utc: datetime, *, latest_allowed_ts: int) -> int:
+    """
+    Unix timestamp when a posted limit order should expire.
+
+    Uses the earlier of (now + ORDER_RESTING_TTL_MINUTES) and ``latest_allowed_ts``
+    (structural cap: BTC :45 UTC or end of weather window).
+    """
+    now = now_utc.astimezone(timezone.utc)
+    short = int((now + timedelta(minutes=ORDER_RESTING_TTL_MINUTES)).timestamp())
+    return min(short, int(latest_allowed_ts))
+
+
 def weather_high_order_expiration_ts(res_date: date, city_id: str) -> int:
+    """Latest allowed order expiry: end of city's HIGH window (local)."""
     w = WEATHER_HIGH_WINDOWS[city_id]
     end = w[1]
     tz = ZoneInfo(CITIES[city_id].tz_name)
@@ -127,6 +143,7 @@ def weather_high_order_expiration_ts(res_date: date, city_id: str) -> int:
 
 
 def weather_low_order_expiration_ts(res_date: date, city_id: str) -> int:
+    """Latest allowed order expiry: 23:00 local on resolution day."""
     tz = ZoneInfo(CITIES[city_id].tz_name)
     dt = datetime(res_date.year, res_date.month, res_date.day, 23, 0, tzinfo=tz)
     return int(dt.timestamp())

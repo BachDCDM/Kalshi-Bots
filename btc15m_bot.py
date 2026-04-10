@@ -3,6 +3,9 @@
 Kalshi BTC 15m market bot: dual-sided entry bids in the first N minutes, then exit limit.
 
 Each completed market session appends a row to ``btc15m_data/trades.db`` (``btc_sessions``).
+Resolved P&amp;L is also written to ``trade_outcomes`` (same schema as the vol-surface panel)
+so the control panel can sum realized cents the same way as vol surface.
+
 The same database has ``btc_order_events``: one row when entry YES/NO orders are placed and
 one per exit order, so you can confirm API placement before the session closes.
 
@@ -193,6 +196,170 @@ class Session:
         return f"b15m-{self.session_id}-sn"
 
 
+def _btc_side_and_contracts_for_realized(
+    yes_f: float, no_f: float, exit_f: float
+) -> tuple[Optional[str], float]:
+    """Which leg we faded and effective contract count for P&amp;L (matches session log)."""
+    if exit_f <= 0:
+        return None, 0.0
+    if yes_f > 0 and no_f <= 0:
+        return "yes", min(float(yes_f), float(exit_f))
+    if no_f > 0 and yes_f <= 0:
+        return "no", min(float(no_f), float(exit_f))
+    return None, 0.0
+
+
+def _ensure_trade_outcomes_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_key TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            market_type TEXT,
+            side TEXT,
+            contracts INTEGER,
+            entry_cents INTEGER,
+            cost_cents INTEGER,
+            placed_at_utc TEXT,
+            pnl_cents INTEGER,
+            status TEXT NOT NULL,
+            resolved_utc TEXT,
+            note TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_outcomes_key ON trade_outcomes(market_key)"
+    )
+
+
+def _insert_resolved_btc_trade_outcome(
+    conn: sqlite3.Connection,
+    *,
+    session_row_id: int,
+    ticker: str,
+    placed_at_utc: str,
+    resolved_utc: str,
+    entry_cents: int,
+    yes_f: float,
+    no_f: float,
+    exit_f: float,
+    pnl_cents: int,
+) -> None:
+    side, n = _btc_side_and_contracts_for_realized(yes_f, no_f, exit_f)
+    if side is None or n <= 0:
+        return
+    contracts = int(round(n))
+    if contracts <= 0:
+        return
+    cost_cents = max(0, contracts * int(entry_cents))
+    mk = f"btc15m:sess:{session_row_id}"
+    conn.execute("DELETE FROM trade_outcomes WHERE market_key = ?", (mk,))
+    conn.execute(
+        """
+        INSERT INTO trade_outcomes (
+            market_key, ticker, market_type, side, contracts, entry_cents,
+            cost_cents, placed_at_utc, pnl_cents, status, resolved_utc, note
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            mk,
+            ticker,
+            "btc_15m",
+            side,
+            contracts,
+            int(entry_cents),
+            cost_cents,
+            placed_at_utc,
+            int(pnl_cents),
+            "resolved",
+            resolved_utc,
+            None,
+        ),
+    )
+
+
+def _maybe_backfill_trade_outcomes_from_sessions(conn: sqlite3.Connection) -> None:
+    """One-time migration: populate trade_outcomes from historical btc_sessions rows."""
+    _ensure_trade_outcomes_table(conn)
+    n_sess = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM btc_sessions WHERE realized_pnl_cents IS NOT NULL"
+        ).fetchone()[0]
+        or 0
+    )
+    n_to = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM trade_outcomes WHERE market_key LIKE 'btc15m:sess:%'"
+        ).fetchone()[0]
+        or 0
+    )
+    if n_sess <= n_to:
+        return
+    cur = conn.execute(
+        """
+        SELECT id, market_ticker, market_open_utc, ended_at_utc, entry_cents,
+               yes_entry_fills, no_entry_fills, exit_fill_count, realized_pnl_cents
+        FROM btc_sessions
+        WHERE realized_pnl_cents IS NOT NULL
+        ORDER BY id
+        """
+    )
+    for (
+        sid,
+        mkt,
+        open_u,
+        ended_u,
+        entry_c,
+        yf,
+        nf,
+        xf,
+        rp,
+    ) in cur.fetchall():
+        mk = f"btc15m:sess:{int(sid)}"
+        if conn.execute(
+            "SELECT 1 FROM trade_outcomes WHERE market_key = ?", (mk,)
+        ).fetchone():
+            continue
+        ticker = (mkt or "").strip() or "UNKNOWN"
+        yes_f = float(yf or 0.0)
+        no_f = float(nf or 0.0)
+        exit_f = float(xf or 0.0)
+        side, n = _btc_side_and_contracts_for_realized(yes_f, no_f, exit_f)
+        if side is None or n <= 0:
+            continue
+        contracts = int(round(n))
+        if contracts <= 0:
+            continue
+        ec = int(entry_c or 0)
+        cost_cents = max(0, contracts * ec)
+        placed_at = (open_u or "").strip() or ""
+        resolved_at = (ended_u or "").strip() or ""
+        conn.execute(
+            """
+            INSERT INTO trade_outcomes (
+                market_key, ticker, market_type, side, contracts, entry_cents,
+                cost_cents, placed_at_utc, pnl_cents, status, resolved_utc, note
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                mk,
+                ticker,
+                "btc_15m",
+                side,
+                contracts,
+                ec,
+                cost_cents,
+                placed_at,
+                int(rp),
+                "resolved",
+                resolved_at,
+                "backfill from btc_sessions",
+            ),
+        )
+
+
 def _trade_db_path() -> Path:
     d = _ROOT / "btc15m_data"
     d.mkdir(parents=True, exist_ok=True)
@@ -244,6 +411,8 @@ def _init_trade_db() -> None:
             )
             """
         )
+        _ensure_trade_outcomes_table(conn)
+        _maybe_backfill_trade_outcomes_from_sessions(conn)
         conn.commit()
     finally:
         conn.close()
@@ -441,7 +610,12 @@ def _log_btc_session_row(
             except sqlite3.OperationalError:
                 pass
 
+            _ensure_trade_outcomes_table(conn)
+            _maybe_backfill_trade_outcomes_from_sessions(conn)
+
             p1, p2, p3, p4 = _prev_four_success_columns(conn)
+            ended_iso = ended.astimezone(timezone.utc).isoformat()
+            open_iso = open_t.astimezone(timezone.utc).isoformat()
             conn.execute(
                 """
                 INSERT INTO btc_sessions (
@@ -455,10 +629,10 @@ def _log_btc_session_row(
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    ended.astimezone(timezone.utc).isoformat(),
+                    ended_iso,
                     hour_utc,
                     ticker,
-                    open_t.astimezone(timezone.utc).isoformat(),
+                    open_iso,
                     close_t.astimezone(timezone.utc).isoformat(),
                     entry_cents,
                     exit_cents,
@@ -475,6 +649,20 @@ def _log_btc_session_row(
                     realized_pnl_cents,
                 ),
             )
+            row_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            if realized_pnl_cents is not None:
+                _insert_resolved_btc_trade_outcome(
+                    conn,
+                    session_row_id=row_id,
+                    ticker=ticker,
+                    placed_at_utc=open_iso,
+                    resolved_utc=ended_iso,
+                    entry_cents=entry_cents,
+                    yes_f=yes_f,
+                    no_f=no_f,
+                    exit_f=exit_f,
+                    pnl_cents=realized_pnl_cents,
+                )
             conn.commit()
         finally:
             conn.close()

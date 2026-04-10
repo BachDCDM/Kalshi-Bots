@@ -17,6 +17,7 @@ strategies:
         tables:
           - btc_sessions
           - btc_order_events
+          - trade_outcomes
 
   - id: weather
     title: "Weather bot"
