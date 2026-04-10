@@ -1,7 +1,9 @@
 """
 Sync Kalshi settlement history into a local SQLite ledger for per-strategy P&L.
 
-Uses PortfolioApi.get_settlements (authoritative realized revenue per market).
+Uses PortfolioApi.get_settlements. We store net P&L per settlement (not raw revenue alone):
+Kalshi's revenue field is gross payout; net = revenue - yes_cost - no_cost - fee (from Settlement dollar fields).
+
 Classifies each settlement to a strategy id:
 
 1. Optional ``settlement_prefixes`` on each strategy in ``strategies.yaml`` (first match wins).
@@ -26,6 +28,29 @@ from typing import Any, Optional
 from kalshi_python_sync.api.portfolio_api import PortfolioApi
 
 from kalshi_readout import load_strategy_env_map, make_kalshi_client
+
+
+def _dollars_str_to_cents(val: Any) -> int:
+    if val is None:
+        return 0
+    try:
+        return int(round(float(str(val).strip()) * 100.0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def settlement_net_pnl_cents(st: Any) -> tuple[int, int, int, int, int]:
+    """
+    Returns (revenue_cents, yes_cost_cents, no_cost_cents, fee_cents, net_pnl_cents).
+
+    ``revenue`` from API is gross payout; net is a best-effort cashflow from settlement.
+    """
+    rev = int(getattr(st, "revenue", None) or 0)
+    yc = _dollars_str_to_cents(getattr(st, "yes_total_cost_dollars", None))
+    nc = _dollars_str_to_cents(getattr(st, "no_total_cost_dollars", None))
+    fc = _dollars_str_to_cents(getattr(st, "fee_cost", None))
+    net = rev - yc - nc - fc
+    return rev, yc, nc, fc, net
 
 
 def ledger_db_path(repo: Path) -> Path:
@@ -56,6 +81,15 @@ def init_ledger_db(repo: Path) -> None:
             )
             """
         )
+        cols = {row[1] for row in c.execute("PRAGMA table_info(kalshi_settlements)")}
+        if "yes_cost_cents" not in cols:
+            c.execute("ALTER TABLE kalshi_settlements ADD COLUMN yes_cost_cents INTEGER NOT NULL DEFAULT 0")
+        if "no_cost_cents" not in cols:
+            c.execute("ALTER TABLE kalshi_settlements ADD COLUMN no_cost_cents INTEGER NOT NULL DEFAULT 0")
+        if "fee_cents" not in cols:
+            c.execute("ALTER TABLE kalshi_settlements ADD COLUMN fee_cents INTEGER NOT NULL DEFAULT 0")
+        if "net_pnl_cents" not in cols:
+            c.execute("ALTER TABLE kalshi_settlements ADD COLUMN net_pnl_cents INTEGER")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS settlement_sync_meta (
@@ -109,7 +143,7 @@ def classify_settlement_ticker(ticker: str, strategies: list[dict[str, Any]]) ->
 
 
 def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
-    """Sum revenue_cents per strategy_id (excludes 'unassigned')."""
+    """Sum net_pnl_cents per strategy_id (excludes 'unassigned'); fallback to revenue if net unset."""
     init_ledger_db(repo)
     p = ledger_db_path(repo)
     if not p.is_file():
@@ -118,7 +152,8 @@ def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
         with _conn(repo) as c:
             cur = c.execute(
                 """
-                SELECT strategy_id, COALESCE(SUM(revenue_cents), 0)
+                SELECT strategy_id,
+                       COALESCE(SUM(COALESCE(net_pnl_cents, revenue_cents)), 0)
                 FROM kalshi_settlements
                 WHERE strategy_id != 'unassigned'
                 GROUP BY strategy_id
@@ -127,6 +162,51 @@ def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
             return {str(row[0]): int(row[1] or 0) for row in cur.fetchall()}
     except sqlite3.Error:
         return {}
+
+
+def vol_surface_ledger_pnl_breakdown(repo: Path) -> dict[str, Any]:
+    """
+    Split vol_surface strategy settlements into btc_hourly vs weather HIGH vs weather LOW
+    (same buckets as the vol dashboard tiles). Uses net_pnl when available.
+    """
+    init_ledger_db(repo)
+    if not ledger_db_path(repo).is_file():
+        return {"has_ledger": False}
+    out = {"btc_hourly": 0, "weather_high": 0, "weather_low": 0}
+    total = 0
+    n = 0
+    try:
+        with _conn(repo) as c:
+            cur = c.execute(
+                """
+                SELECT ticker,
+                       COALESCE(net_pnl_cents, revenue_cents) AS amt
+                FROM kalshi_settlements
+                WHERE strategy_id = 'vol_surface'
+                """
+            )
+            for row in cur.fetchall():
+                t = str(row[0] or "").strip().upper()
+                amt = int(row[1] or 0)
+                total += amt
+                n += 1
+                if t.startswith("KXBTC-"):
+                    out["btc_hourly"] += amt
+                elif t.startswith("KXLOW"):
+                    out["weather_low"] += amt
+                elif t.startswith("KXHIGH") or t.startswith("KXHIGHT"):
+                    out["weather_high"] += amt
+                else:
+                    out["weather_high"] += amt
+    except sqlite3.Error:
+        return {"has_ledger": False}
+    if n == 0:
+        return {"has_ledger": False}
+    return {
+        "has_ledger": True,
+        "cumulative_pnl_cents": total,
+        "pnl_by_market_type": out,
+    }
 
 
 def ledger_row_counts(repo: Path) -> dict[str, int]:
@@ -196,22 +276,45 @@ def sync_settlements_once(
                     rev = getattr(st, "revenue", None)
                     if rev is None:
                         continue
-                    revenue_cents = int(rev)
+                    revenue_cents, yc, nc, fc, net_cents = settlement_net_pnl_cents(st)
+                    if os.environ.get("CONTROL_PANEL_SETTLEMENT_USE_GROSS", "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
+                        net_cents = revenue_cents
                     sid = classify_settlement_ticker(ticker, strategies)
                     c.execute(
                         """
                         INSERT INTO kalshi_settlements (
                             ticker, settled_time_iso, event_ticker, market_result,
-                            revenue_cents, strategy_id, synced_at_utc
-                        ) VALUES (?,?,?,?,?,?,?)
+                            revenue_cents, yes_cost_cents, no_cost_cents, fee_cents,
+                            net_pnl_cents, strategy_id, synced_at_utc
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(ticker, settled_time_iso) DO UPDATE SET
                             event_ticker=excluded.event_ticker,
                             market_result=excluded.market_result,
                             revenue_cents=excluded.revenue_cents,
+                            yes_cost_cents=excluded.yes_cost_cents,
+                            no_cost_cents=excluded.no_cost_cents,
+                            fee_cents=excluded.fee_cents,
+                            net_pnl_cents=excluded.net_pnl_cents,
                             strategy_id=excluded.strategy_id,
                             synced_at_utc=excluded.synced_at_utc
                         """,
-                        (ticker, st_iso, ev, mres, revenue_cents, sid, synced),
+                        (
+                            ticker,
+                            st_iso,
+                            ev,
+                            mres,
+                            revenue_cents,
+                            yc,
+                            nc,
+                            fc,
+                            net_cents,
+                            sid,
+                            synced,
+                        ),
                     )
                     total_rows += 1
                     by_strategy[sid] = by_strategy.get(sid, 0) + 1

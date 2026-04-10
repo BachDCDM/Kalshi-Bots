@@ -104,7 +104,7 @@ function fmtCents(c) {
 function pnlCaption(src) {
   if (src === 'realized_trades') return 'realized (DB)';
   if (src === 'approx_logged_mids') return 'per-session realized (DB)';
-  if (src === 'kalshi_settlements_ledger') return 'Kalshi settlement ledger (API sync)';
+  if (src === 'kalshi_settlements_ledger') return 'Kalshi settlements (net of cost &amp; fees)';
   if (src === 'vol_surface_settlements') return 'resolved settlements (panel DB)';
   return 'logged';
 }
@@ -356,7 +356,11 @@ function loadVolSurfaceDashboard(el, sid) {
     h += '<div class="overview-tile"><div class="hint">Weather HIGH</div><div class="big">' + fmtCents(pnl.weather_high) + '</div></div>';
     h += '<div class="overview-tile"><div class="hint">Weather LOW</div><div class="big">' + fmtCents(pnl.weather_low) + '</div></div>';
     h += '</div>';
-    h += '<p class="hint" style="margin:0.5rem 0">Realized P&amp;L fills when settlements are recorded (<code>trade_outcomes</code>). Open positions show as &quot;open&quot; until resolved.</p>';
+    if (j.pnl_source === 'kalshi_settlement_ledger') {
+      h += '<p class="hint" style="margin:0.5rem 0">Tile totals use the <strong>Kalshi settlement ledger</strong> (net P&amp;L: payout minus YES/NO cost basis and fees). <code>trade_outcomes</code> in panel.db is separate bot tracking.</p>';
+    } else {
+      h += '<p class="hint" style="margin:0.5rem 0">Realized P&amp;L from <code>trade_outcomes</code> when the bot records settlements. Open positions show as &quot;open&quot; until resolved.</p>';
+    }
     h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">All markets</h3>';
     h += '<p class="hint" style="margin:0 0 0.5rem">Window = strategy trading hours. <strong>5m tick</strong> = this minute is an evaluation tick (:00,:05,…; BTC uses UTC). Last scan updates when the bot runs a full calc for that key. Order: <em>None</em> (no resting order / flat), <em>Open order</em> (limit working), <em>Active position</em> (filled / holding).</p>';
     const mktList = j.markets && j.markets.length ? j.markets : (j.tracker_rows || []);

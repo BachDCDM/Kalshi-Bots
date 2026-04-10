@@ -26,6 +26,7 @@ from settlement_sync import (
     get_ledger_pnl_by_strategy,
     ledger_row_counts,
     sync_settlements_once,
+    vol_surface_ledger_pnl_breakdown,
 )
 from btc15m_prefs import (
     MAX_CONTRACTS,
@@ -684,7 +685,15 @@ def vol_surface_dashboard(sid: str) -> dict[str, Any]:
         from vol_surface_strategy.panel_snapshot import build_dashboard_payload
     except ImportError as e:
         return {"ok": False, "error": str(e)}
-    return build_dashboard_payload(repo)
+    payload = build_dashboard_payload(repo)
+    ledger_br = vol_surface_ledger_pnl_breakdown(repo)
+    if ledger_br.get("has_ledger"):
+        payload["cumulative_pnl_cents"] = ledger_br["cumulative_pnl_cents"]
+        payload["pnl_by_market_type"] = ledger_br["pnl_by_market_type"]
+        payload["pnl_source"] = "kalshi_settlement_ledger"
+    else:
+        payload["pnl_source"] = "trade_outcomes"
+    return payload
 
 
 @app.get("/api/strategies/{sid}/weather-snapshot")
