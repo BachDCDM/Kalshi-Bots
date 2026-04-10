@@ -1,8 +1,11 @@
 """
 Sync Kalshi settlement history into a local SQLite ledger for per-strategy P&L.
 
-Uses PortfolioApi.get_settlements. We store net P&L per settlement (not raw revenue alone):
-Kalshi's revenue field is gross payout; net = revenue - yes_cost - no_cost - fee (from Settlement dollar fields).
+Uses PortfolioApi.get_settlements. Net P&L per row = revenue (cents) - YES cost - NO cost - fees.
+
+Cost basis: prefer API fields ``yes_total_cost`` / ``no_total_cost`` (integer **cents**, deprecated but
+still returned) over parsing ``*_total_cost_dollars``. Parsing dollars incorrectly can inflate costs
+~100× and make BTC 15m / other series look hugely negative.
 
 Classifies each settlement to a strategy id:
 
@@ -39,15 +42,40 @@ def _dollars_str_to_cents(val: Any) -> int:
         return 0
 
 
+def _legacy_int_cents(val: Any) -> Optional[int]:
+    """Kalshi ``yes_total_cost`` / ``no_total_cost`` are integer cents when present."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _yes_position_cost_cents(st: Any) -> int:
+    leg = _legacy_int_cents(getattr(st, "yes_total_cost", None))
+    if leg is not None:
+        return leg
+    return _dollars_str_to_cents(getattr(st, "yes_total_cost_dollars", None))
+
+
+def _no_position_cost_cents(st: Any) -> int:
+    leg = _legacy_int_cents(getattr(st, "no_total_cost", None))
+    if leg is not None:
+        return leg
+    return _dollars_str_to_cents(getattr(st, "no_total_cost_dollars", None))
+
+
 def settlement_net_pnl_cents(st: Any) -> tuple[int, int, int, int, int]:
     """
     Returns (revenue_cents, yes_cost_cents, no_cost_cents, fee_cents, net_pnl_cents).
 
-    ``revenue`` from API is gross payout; net is a best-effort cashflow from settlement.
+    ``revenue`` is gross payout on winners (cents). Position costs are cost basis in cents.
+    Prefer legacy integer cost fields when the API sends them.
     """
     rev = int(getattr(st, "revenue", None) or 0)
-    yc = _dollars_str_to_cents(getattr(st, "yes_total_cost_dollars", None))
-    nc = _dollars_str_to_cents(getattr(st, "no_total_cost_dollars", None))
+    yc = _yes_position_cost_cents(st)
+    nc = _no_position_cost_cents(st)
     fc = _dollars_str_to_cents(getattr(st, "fee_cost", None))
     net = rev - yc - nc - fc
     return rev, yc, nc, fc, net
@@ -132,7 +160,8 @@ def classify_settlement_ticker(ticker: str, strategies: list[dict[str, Any]]) ->
             pu = str(p).strip().upper()
             if pu and u.startswith(pu):
                 return str(sid)
-    if "BTC15M" in u or "KXBTC15M" in u:
+    # 15m series only (avoid substring false positives vs other KXBTC* products).
+    if u.startswith("KXBTC15M"):
         return "btc15m"
     if u.startswith("KXBTC-"):
         return "vol_surface"
