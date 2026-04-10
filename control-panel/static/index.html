@@ -330,6 +330,12 @@ function downloadCsv(columns, rows, filename) {
   document.body.removeChild(a);
 }
 
+function volSurfaceOrderStatusLabel(os) {
+  if (os === 'open') return 'Open order';
+  if (os === 'active_position') return 'Active position';
+  return 'None';
+}
+
 function loadVolSurfaceDashboard(el, sid) {
   if (!el) return;
   el.innerHTML = 'Loading…';
@@ -350,37 +356,44 @@ function loadVolSurfaceDashboard(el, sid) {
     h += '<div class="overview-tile"><div class="hint">Weather LOW</div><div class="big">' + fmtCents(pnl.weather_low) + '</div></div>';
     h += '</div>';
     h += '<p class="hint" style="margin:0.5rem 0">Realized P&amp;L fills when settlements are recorded (<code>trade_outcomes</code>). Open positions show as &quot;open&quot; until resolved.</p>';
-    h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Markets (tracker + window)</h3>';
-    for (const m of (j.tracker_rows || [])) {
+    h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">All markets</h3>';
+    h += '<p class="hint" style="margin:0 0 0.5rem">Window = strategy trading hours. <strong>5m tick</strong> = this minute is an evaluation tick (:00,:05,…; BTC uses UTC). Last scan updates when the bot runs a full calc for that key. Order: <em>None</em> (no resting order / flat), <em>Open order</em> (limit working), <em>Active position</em> (filled / holding).</p>';
+    const mktList = j.markets && j.markets.length ? j.markets : (j.tracker_rows || []);
+    h += '<div class="table-wrap"><table style="font-size:0.82rem"><thead><tr>';
+    h += '<th>Market</th><th>Window</th><th>In window</th><th>5m tick</th><th>Last scan (ET)</th><th>Order</th><th>Tracker</th>';
+    h += '</tr></thead><tbody>';
+    for (const m of mktList) {
       const w = m.window || {};
       const sc = m.last_scan || {};
-      const inW = w.in_trading_window ? '<span style="color:var(--ok)">in window</span>' : '<span style="color:var(--muted)">outside window</span>';
-      h += '<div class="overview-tile" style="margin-bottom:0.65rem">';
-      h += '<strong>' + escapeHtml(m.key || '') + '</strong> · status <code>' + escapeHtml(m.status || '') + '</code> · ' + inW;
-      if (w.minutes_to_window_end != null && w.in_trading_window) {
-        h += ' · ~' + Math.round(w.minutes_to_window_end) + ' min to window end';
-      }
-      if (w.window_hint) h += '<div class="hint">' + escapeHtml(w.window_hint) + '</div>';
-      if (w.next_window_hint) h += '<div class="hint">' + escapeHtml(w.next_window_hint) + '</div>';
-      if (w.local_window) h += '<div class="hint">' + escapeHtml(w.local_window) + ' · ' + escapeHtml(w.timezone || '') + '</div>';
-      h += '<div style="margin-top:0.35rem;font-size:0.85rem">';
-      if (sc.updated_utc) {
-        h += 'Last scan: ' + escapeHtml(utcToEst(sc.updated_utc)) + ' ET — ';
-      }
-      if (sc.trade_recommended) {
-        h += '<strong style="color:var(--ok)">TRADE</strong> ' + escapeHtml(sc.outlier_ticker || '') + ' ' + String(sc.side || '').toUpperCase();
-        h += ' ×' + (sc.contracts != null ? sc.contracts : '—') + ' @ ' + (sc.entry_cents != null ? sc.entry_cents + '¢' : '—');
-        if (sc.edge_cents != null) h += ' · edge ' + sc.edge_cents + '¢';
+      const label = escapeHtml(m.label || m.key || '');
+      const inW = w.in_trading_window ? '<span style="color:var(--ok)">Yes</span>' : '<span style="color:var(--muted)">No</span>';
+      const tick = (w.monitor_tick === true) ? '<span style="color:var(--ok)">Yes</span>' : '<span style="color:var(--muted)">No</span>';
+      let winCol = '';
+      if ((w.kind || '') === 'btc_hourly') {
+        winCol = escapeHtml((w.window_hint || '') + (w.next_window_hint ? ' ' + w.next_window_hint : ''));
       } else {
-        h += '<span style="color:var(--muted)">No trade</span> — <code>' + escapeHtml(String(sc.reason || '')) + '</code>';
-        if (sc.action) h += ' · action <code>' + escapeHtml(String(sc.action)) + '</code>';
+        winCol = escapeHtml((w.local_window || '') + ' ' + (w.timezone || ''));
       }
-      h += '</div>';
-      if (sc.gate_log_tail && sc.gate_log_tail.length) {
-        h += '<div class="hint" style="margin-top:0.25rem">Gates: ' + escapeHtml(sc.gate_log_tail.join(' · ')) + '</div>';
+      let scanCol = '—';
+      if (sc.updated_utc) {
+        scanCol = escapeHtml(utcToEst(sc.updated_utc));
+        if (sc.trade_recommended) {
+          scanCol += ' <span style="color:var(--ok)">trade</span> ' + escapeHtml(sc.outlier_ticker || '');
+        } else {
+          const rs = String(sc.reason || sc.action || '').slice(0, 72);
+          if (rs) scanCol += ' <span class="hint">' + escapeHtml(rs) + '</span>';
+        }
       }
-      h += '</div>';
+      const ord = volSurfaceOrderStatusLabel(m.order_status);
+      const ordHtml = ord === 'None'
+        ? '<span style="color:var(--muted)">None</span>'
+        : (ord === 'Open order' ? '<span style="color:#8cb4ff">Open order</span>' : '<span style="color:var(--ok)">Active position</span>');
+      const trk = escapeHtml(m.status != null ? String(m.status) : (m.raw_status != null ? String(m.raw_status) : '—'));
+      h += '<tr title="' + escapeHtml(m.key || '') + '"><td><strong>' + label + '</strong></td>';
+      h += '<td>' + winCol + '</td><td>' + inW + '</td><td>' + tick + '</td>';
+      h += '<td>' + scanCol + '</td><td>' + ordHtml + '</td><td><code>' + trk + '</code></td></tr>';
     }
+    h += '</tbody></table></div>';
     h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Recent orders</h3>';
     h += '<div class="table-wrap"><table><thead><tr><th>Time (ET)</th><th>Market</th><th>Event</th><th>Ticker</th><th>Side</th><th>Qty</th><th>¢</th></tr></thead><tbody>';
     for (const ev of (j.recent_order_events || []).slice(0, 40)) {

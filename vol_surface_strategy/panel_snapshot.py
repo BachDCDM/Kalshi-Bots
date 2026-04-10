@@ -9,17 +9,21 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from vol_surface_strategy.config import CITIES
+from vol_surface_strategy.discovery import resolution_date_for_high_scan, resolution_date_for_low_scan
 from vol_surface_strategy.panel_state import PANEL_DB_PATH, init_panel_db, sum_pnl_by_market_type, sum_realized_pnl_cents
-from vol_surface_strategy.tracker import list_all_rows
+from vol_surface_strategy.tracker import btc_key, get_row, weather_key
 from vol_surface_strategy.trading_windows import (
     btc_in_trading_window,
     btc_order_expiration_ts,
+    btc_should_monitor,
     minutes_until_btc_hour_end,
     minutes_until_weather_high_end,
     minutes_until_weather_low_end,
     normalize_tracker_status,
     weather_high_in_window,
+    weather_high_should_monitor,
     weather_low_in_window,
+    weather_low_should_monitor,
     WEATHER_HIGH_WINDOWS,
     WEATHER_LOW_WINDOW,
 )
@@ -69,6 +73,7 @@ def _describe_market_window(
         return {
             "kind": "btc_hourly",
             "in_trading_window": in_w,
+            "monitor_tick": btc_should_monitor(utc),
             "minutes_to_hour_end": round(t_rem, 1),
             "order_expiration_ts": exp,
             "window_hint": "UTC :05–:40 scan; :45 cancel" + (" · active now" if in_w else ""),
@@ -87,18 +92,23 @@ def _describe_market_window(
             t_rem = minutes_until_weather_low_end(loc)
         sh, sm = start
         eh, em = end
+        if hi_lo == "HIGH":
+            mon = weather_high_should_monitor(city_id, loc)
+        else:
+            mon = weather_low_should_monitor(loc)
         return {
             "kind": "weather",
             "city_id": city_id,
             "high_low": hi_lo,
             "timezone": CITIES[city_id].tz_name,
             "in_trading_window": in_w,
+            "monitor_tick": mon,
             "minutes_to_window_end": round(t_rem, 1),
             "local_window": f"{sh:02d}:{sm:02d}–{eh:02d}:{em:02d} local",
             "window_hint": ("Inside trading window" if in_w else "Outside trading window"),
         }
 
-    return {"kind": "unknown", "in_trading_window": False, "window_hint": ""}
+    return {"kind": "unknown", "in_trading_window": False, "monitor_tick": False, "window_hint": ""}
 
 
 def _read_last_scan_row(market_key: str) -> Optional[dict[str, Any]]:
@@ -164,63 +174,111 @@ def _read_trade_outcomes(limit: int = 100) -> list[dict[str, Any]]:
         return []
 
 
+def _last_scan_summary(scan: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not scan:
+        return None
+    gl = scan.get("gate_log_json") or "[]"
+    try:
+        glp = json.loads(gl) if isinstance(gl, str) else gl
+    except json.JSONDecodeError:
+        glp = []
+    return {
+        "updated_utc": scan.get("updated_utc"),
+        "action": scan.get("action"),
+        "reason": scan.get("reason"),
+        "edge_cents": scan.get("edge_cents"),
+        "trade_recommended": scan.get("action") == "trade",
+        "outlier_ticker": scan.get("outlier_ticker"),
+        "side": scan.get("side"),
+        "entry_cents": scan.get("entry_cents"),
+        "contracts": scan.get("contracts"),
+        "sigma_star": scan.get("sigma_star"),
+        "underlying": scan.get("underlying"),
+        "gate_log_tail": (glp[-5:] if isinstance(glp, list) else []),
+    }
+
+
+def _order_status_from_tracker(row: Optional[Any]) -> str:
+    """UI bucket: none | open | active_position."""
+    if row is None:
+        return "none"
+    st = normalize_tracker_status(row.status)
+    if st == "order_resting":
+        return "open"
+    if st == "position_active":
+        return "active_position"
+    return "none"
+
+
+def _enumerate_all_market_specs(now_utc: datetime) -> list[tuple[str, str, str]]:
+    """Current-hour BTC plus every city HIGH/LOW for today's resolution dates (local per city)."""
+    out: list[tuple[str, str, str]] = []
+    u = now_utc.astimezone(timezone.utc)
+    hour_start = u.replace(minute=0, second=0, microsecond=0)
+    out.append(
+        (
+            btc_key(hour_start),
+            f"BTC hourly · {hour_start.strftime('%Y-%m-%d %H:00')} UTC",
+            "btc_hourly",
+        )
+    )
+    for city_id in sorted(CITIES.keys()):
+        tz = ZoneInfo(CITIES[city_id].tz_name)
+        loc = now_utc.astimezone(tz)
+        dh = resolution_date_for_high_scan(loc)
+        dl = resolution_date_for_low_scan(loc)
+        kh = weather_key(city_id, "HIGH", dh)
+        kl = weather_key(city_id, "LOW", dl)
+        out.append((kh, f"{city_id} HIGH · {dh.isoformat()}", "weather_high"))
+        out.append((kl, f"{city_id} LOW · {dl.isoformat()}", "weather_low"))
+    return out
+
+
+def _build_market_row(
+    key: str,
+    label: str,
+    default_market_type: str,
+    now_utc: datetime,
+) -> dict[str, Any]:
+    row = get_row(key)
+    mt, cid, hil = _parse_key_parts(key)
+    mt_eff = (row.market_type if row and row.market_type else None) or default_market_type
+    st = normalize_tracker_status(row.status) if row else None
+    win = _describe_market_window(key, mt_eff, cid, hil, now_utc)
+    scan = _read_last_scan_row(key)
+    return {
+        "key": key,
+        "label": label,
+        "order_status": _order_status_from_tracker(row),
+        "status": st,
+        "market_type": row.market_type if row else default_market_type,
+        "raw_status": row.status if row else None,
+        "ticker": row.ticker if row else None,
+        "side": row.side if row else None,
+        "contracts": row.contracts if row else None,
+        "entry_cents": row.entry_cents if row else None,
+        "order_id": row.order_id if row else None,
+        "city_id": row.city_id if row else cid,
+        "resolution_date": row.resolution_date if row else None,
+        "hour_start_utc": row.hour_start_utc if row else None,
+        "window": win,
+        "last_scan": _last_scan_summary(scan),
+    }
+
+
 def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
     """Full JSON for GET /api/strategies/vol-surface/dashboard."""
     now = datetime.now(timezone.utc)
-    rows = list_all_rows(250)
-    markets: list[dict[str, Any]] = []
-
-    for row in rows:
-        mt, cid, hil = _parse_key_parts(row.key)
-        st = normalize_tracker_status(row.status)
-        win = _describe_market_window(row.key, row.market_type or mt, cid, hil, now)
-        scan = _read_last_scan_row(row.key)
-        scan_summary: Optional[dict[str, Any]] = None
-        if scan:
-            gl = scan.get("gate_log_json") or "[]"
-            try:
-                glp = json.loads(gl) if isinstance(gl, str) else gl
-            except json.JSONDecodeError:
-                glp = []
-            scan_summary = {
-                "updated_utc": scan.get("updated_utc"),
-                "action": scan.get("action"),
-                "reason": scan.get("reason"),
-                "edge_cents": scan.get("edge_cents"),
-                "trade_recommended": scan.get("action") == "trade",
-                "outlier_ticker": scan.get("outlier_ticker"),
-                "side": scan.get("side"),
-                "entry_cents": scan.get("entry_cents"),
-                "contracts": scan.get("contracts"),
-                "sigma_star": scan.get("sigma_star"),
-                "underlying": scan.get("underlying"),
-                "gate_log_tail": (glp[-5:] if isinstance(glp, list) else []),
-            }
-        markets.append(
-            {
-                "key": row.key,
-                "status": st,
-                "market_type": row.market_type,
-                "raw_status": row.status,
-                "ticker": row.ticker,
-                "side": row.side,
-                "contracts": row.contracts,
-                "entry_cents": row.entry_cents,
-                "order_id": row.order_id,
-                "city_id": row.city_id,
-                "resolution_date": row.resolution_date,
-                "hour_start_utc": row.hour_start_utc,
-                "window": win,
-                "last_scan": scan_summary,
-            }
-        )
+    specs = _enumerate_all_market_specs(now)
+    markets_full = [_build_market_row(k, lab, dmt, now) for k, lab, dmt in specs]
 
     pnl_by = sum_pnl_by_market_type()
     return {
         "generated_at_utc": now.isoformat(),
         "cumulative_pnl_cents": sum_realized_pnl_cents(),
         "pnl_by_market_type": pnl_by,
-        "tracker_rows": markets,
+        "markets": markets_full,
+        "tracker_rows": markets_full,
         "recent_order_events": _read_recent_orders(100),
         "trade_outcomes": _read_trade_outcomes(120),
         "panel_db": str(PANEL_DB_PATH),
