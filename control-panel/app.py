@@ -346,7 +346,6 @@ def _settlement_sync_job() -> None:
 
 
 async def _settlement_sync_loop() -> None:
-    await asyncio.to_thread(_settlement_sync_job)
     while True:
         await asyncio.sleep(max(120, SETTLEMENT_SYNC_INTERVAL_SEC))
         await asyncio.to_thread(_settlement_sync_job)
@@ -356,6 +355,8 @@ async def _settlement_sync_loop() -> None:
 async def _lifespan(app: FastAPI):
     envf = _balance_env_rel()
     await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
+    # Refresh ledger once before serving: payout math (e.g. gross reconstruction) must match DB rows.
+    await asyncio.to_thread(_settlement_sync_job)
     bal_task = asyncio.create_task(_balance_heartbeat_loop())
     st_task = asyncio.create_task(_settlement_sync_loop())
     try:

@@ -1,7 +1,13 @@
 """
 Sync Kalshi settlement history into a local SQLite ledger for per-strategy P&L.
 
-Uses PortfolioApi.get_settlements. Net P&L per row = revenue (cents) - YES cost - NO cost - fees.
+Uses PortfolioApi.get_settlements. Net P&L per row = gross payout (cents) − YES cost − NO cost − fees.
+
+Gross payout is **always reconstructed** from ``yes_count_fp`` / ``no_count_fp`` and
+``market_result`` / ``value`` for standard YES/NO resolutions (binary complement in cents).
+Kalshi ``revenue`` can be **net** across offsetting YES/NO legs while costs are **gross**,
+so trusting ``revenue`` misstates dual-sided settlements. For ``void`` / ``scalar`` (or other
+non-binary ``market_result``), ``revenue`` is used as-is.
 
 Cost basis: prefer API fields ``yes_total_cost`` / ``no_total_cost`` (integer **cents**, deprecated but
 still returned) over parsing ``*_total_cost_dollars``. Parsing dollars incorrectly can inflate costs
@@ -66,19 +72,87 @@ def _no_position_cost_cents(st: Any) -> int:
     return _dollars_str_to_cents(getattr(st, "no_total_cost_dollars", None))
 
 
+def _fp_contract_count(val: Any) -> float:
+    """Parse Kalshi fixed-point contract count (e.g. ``\"10.00\"``)."""
+    if val is None:
+        return 0.0
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _yes_no_contract_counts(st: Any) -> tuple[float, float]:
+    """Contract counts at settlement (prefer ``*_count_fp`` from current API)."""
+    y = _fp_contract_count(getattr(st, "yes_count_fp", None))
+    n = _fp_contract_count(getattr(st, "no_count_fp", None))
+    if y == 0.0 and n == 0.0:
+        for attr, tgt in (("yes_count", "y"), ("no_count", "n")):
+            raw = getattr(st, attr, None)
+            if raw is None:
+                continue
+            try:
+                v = float(int(raw))
+            except (TypeError, ValueError):
+                continue
+            if tgt == "y":
+                y = v
+            else:
+                n = v
+    return y, n
+
+
+def settlement_gross_payout_cents(st: Any) -> int:
+    """
+    Cash value credited at settlement for the **gross** winning leg (cents), for YES/NO markets.
+
+    Always reconstruct from contract counts and Kalshi ``value`` (payout per YES contract in cents):
+
+        payout = yes_count * value + no_count * (100 - value)
+
+    Do **not** use API ``revenue`` here: it is often **net** (internal YES/NO offset) while
+    ``yes_total_cost`` / ``no_total_cost`` are **gross**, which would break dual-sided PnL.
+
+    For ``void`` / ``scalar``, or any ``market_result`` other than ``yes``/``no``, returns
+    ``revenue`` (cents) as-is.
+    """
+    api = int(getattr(st, "revenue", None) or 0)
+    mr = str(getattr(st, "market_result", "") or "").lower()
+    if mr in ("void", "scalar"):
+        return api
+    if mr not in ("yes", "no"):
+        return api
+
+    y, n = _yes_no_contract_counts(st)
+    v_raw = getattr(st, "value", None)
+    try:
+        if v_raw is None:
+            val = 100 if mr == "yes" else 0
+        else:
+            val = int(v_raw)
+    except (TypeError, ValueError):
+        val = 100 if mr == "yes" else 0
+    val = max(0, min(100, val))
+
+    return int(round(y * float(val) + n * float(100 - val)))
+
+
 def settlement_net_pnl_cents(st: Any) -> tuple[int, int, int, int, int]:
     """
-    Returns (revenue_cents, yes_cost_cents, no_cost_cents, fee_cents, net_pnl_cents).
+    Returns (gross_payout_cents, yes_cost_cents, no_cost_cents, fee_cents, net_pnl_cents).
 
-    ``revenue`` is gross payout on winners (cents). Position costs are cost basis in cents.
-    Prefer legacy integer cost fields when the API sends them.
+    ``gross_payout_cents`` is from ``settlement_gross_payout_cents`` (reconstructed for yes/no).
+    Costs prefer legacy integer fields, else dollar strings converted to cents.
     """
-    rev = int(getattr(st, "revenue", None) or 0)
+    gp = settlement_gross_payout_cents(st)
     yc = _yes_position_cost_cents(st)
     nc = _no_position_cost_cents(st)
     fc = _dollars_str_to_cents(getattr(st, "fee_cost", None))
-    net = rev - yc - nc - fc
-    return rev, yc, nc, fc, net
+    net = gp - yc - nc - fc
+    return gp, yc, nc, fc, net
 
 
 def ledger_db_path(repo: Path) -> Path:
@@ -172,7 +246,7 @@ def classify_settlement_ticker(ticker: str, strategies: list[dict[str, Any]]) ->
 
 
 def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
-    """Sum net_pnl_cents per strategy_id (excludes 'unassigned'); fallback to revenue if net unset."""
+    """Sum ``net_pnl_cents`` per strategy_id (excludes 'unassigned'). ``revenue_cents`` stores gross payout, not net."""
     init_ledger_db(repo)
     p = ledger_db_path(repo)
     if not p.is_file():
@@ -182,7 +256,7 @@ def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
             cur = c.execute(
                 """
                 SELECT strategy_id,
-                       COALESCE(SUM(COALESCE(net_pnl_cents, revenue_cents)), 0)
+                       COALESCE(SUM(COALESCE(net_pnl_cents, 0)), 0)
                 FROM kalshi_settlements
                 WHERE strategy_id != 'unassigned'
                 GROUP BY strategy_id
@@ -209,7 +283,7 @@ def vol_surface_ledger_pnl_breakdown(repo: Path) -> dict[str, Any]:
             cur = c.execute(
                 """
                 SELECT ticker,
-                       COALESCE(net_pnl_cents, revenue_cents) AS amt
+                       COALESCE(net_pnl_cents, 0) AS amt
                 FROM kalshi_settlements
                 WHERE strategy_id = 'vol_surface'
                 """
@@ -302,16 +376,13 @@ def sync_settlements_once(
                         st_iso = str(settled)
                     ev = str(getattr(st, "event_ticker", "") or "")
                     mres = str(getattr(st, "market_result", "") or "")
-                    rev = getattr(st, "revenue", None)
-                    if rev is None:
-                        continue
-                    revenue_cents, yc, nc, fc, net_cents = settlement_net_pnl_cents(st)
+                    gross_payout_cents, yc, nc, fc, net_cents = settlement_net_pnl_cents(st)
                     if os.environ.get("CONTROL_PANEL_SETTLEMENT_USE_GROSS", "").strip().lower() in (
                         "1",
                         "true",
                         "yes",
                     ):
-                        net_cents = revenue_cents
+                        net_cents = gross_payout_cents
                     sid = classify_settlement_ticker(ticker, strategies)
                     c.execute(
                         """
@@ -336,7 +407,7 @@ def sync_settlements_once(
                             st_iso,
                             ev,
                             mres,
-                            revenue_cents,
+                            gross_payout_cents,
                             yc,
                             nc,
                             fc,
