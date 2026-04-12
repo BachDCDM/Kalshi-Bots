@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from settlement_sync import (
@@ -345,6 +345,34 @@ def _settlement_sync_job() -> None:
         _LOG.exception("settlement sync failed")
 
 
+def _settlement_full_sync_on_start_enabled() -> bool:
+    v = os.environ.get("CONTROL_PANEL_SETTLEMENT_FULL_SYNC_ON_START", "1").strip().lower()
+    return v not in ("0", "false", "no")
+
+
+def _settlement_sync_startup_job() -> None:
+    """Re-pull settlements so ledger rows match current payout rules (bounded sync skips old rows)."""
+    try:
+        full = _settlement_full_sync_on_start_enabled()
+        r = sync_settlements_once(
+            _REPO.resolve(),
+            _load_strategies(),
+            env_file=_balance_env_rel(),
+            full_history=full,
+        )
+        if not r.get("ok"):
+            _LOG.warning("startup settlement sync failed: %s", r.get("error"))
+        else:
+            _LOG.info(
+                "startup settlement sync ok (full_history=%s) settlements_processed=%s min_ts=%s",
+                full,
+                r.get("settlements_processed"),
+                r.get("min_ts_used"),
+            )
+    except Exception:
+        _LOG.exception("startup settlement sync failed")
+
+
 async def _settlement_sync_loop() -> None:
     while True:
         await asyncio.sleep(max(120, SETTLEMENT_SYNC_INTERVAL_SEC))
@@ -355,8 +383,8 @@ async def _settlement_sync_loop() -> None:
 async def _lifespan(app: FastAPI):
     envf = _balance_env_rel()
     await asyncio.to_thread(refresh_balance_cache, _REPO, envf)
-    # Refresh ledger once before serving: payout math (e.g. gross reconstruction) must match DB rows.
-    await asyncio.to_thread(_settlement_sync_job)
+    # Full settlement pull once before serving so existing ledger rows get corrected net_pnl.
+    await asyncio.to_thread(_settlement_sync_startup_job)
     bal_task = asyncio.create_task(_balance_heartbeat_loop())
     st_task = asyncio.create_task(_settlement_sync_loop())
     try:
@@ -469,10 +497,18 @@ def overview() -> dict[str, Any]:
 
 
 @app.post("/api/sync-settlements")
-def trigger_settlement_sync() -> dict[str, Any]:
+def trigger_settlement_sync(
+    full: bool = Query(
+        False,
+        description="If true, re-fetch all settlements (omit min_ts). Slow; fixes stale ledger rows.",
+    ),
+) -> dict[str, Any]:
     """Pull Kalshi settlements into the local ledger (same job as the periodic sync)."""
     return sync_settlements_once(
-        _REPO.resolve(), _load_strategies(), env_file=_balance_env_rel()
+        _REPO.resolve(),
+        _load_strategies(),
+        env_file=_balance_env_rel(),
+        full_history=full,
     )
 
 

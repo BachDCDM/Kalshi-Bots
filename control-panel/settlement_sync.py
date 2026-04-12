@@ -333,9 +333,14 @@ def sync_settlements_once(
     *,
     env_file: str = ".env",
     lookback_days: Optional[int] = None,
+    full_history: bool = False,
 ) -> dict[str, Any]:
     """
     Pull settlements from Kalshi (paged), upsert into ledger. Returns summary dict.
+
+    ``full_history=True`` omits ``min_ts`` on the API so **all** pages are walked (slow but
+    refreshes every ledger row—use after payout-logic fixes). Otherwise ``min_ts`` is
+    ``now - lookback_days`` (default from ``CONTROL_PANEL_SETTLEMENT_LOOKBACK_DAYS``, max 3y).
     """
     init_ledger_db(repo)
     vals = load_strategy_env_map(repo, env_file)
@@ -344,13 +349,19 @@ def sync_settlements_once(
         return {"ok": False, "error": "no Kalshi client", "inserted": 0, "updated": 0}
 
     now = int(time.time())
-    if lookback_days is None:
-        try:
-            lookback_days = int(os.environ.get("CONTROL_PANEL_SETTLEMENT_LOOKBACK_DAYS", "120"))
-        except ValueError:
-            lookback_days = 120
-    lookback_days = max(7, min(365 * 3, int(lookback_days)))
-    min_ts = now - lookback_days * 86400
+    min_ts: Optional[int]
+    lookback_effective: Optional[int]
+    if full_history:
+        min_ts = None
+        lookback_effective = None
+    else:
+        if lookback_days is None:
+            try:
+                lookback_days = int(os.environ.get("CONTROL_PANEL_SETTLEMENT_LOOKBACK_DAYS", "120"))
+            except ValueError:
+                lookback_days = 120
+        lookback_effective = max(7, min(365 * 3, int(lookback_days)))
+        min_ts = now - lookback_effective * 86400
 
     api = PortfolioApi(client)
     cursor: Optional[str] = None
@@ -433,5 +444,7 @@ def sync_settlements_once(
         "settlements_processed": total_rows,
         "by_strategy_counts": by_strategy,
         "min_ts_used": min_ts,
+        "full_history": full_history,
+        "lookback_days": lookback_effective if not full_history else None,
         "ledger_db": str(ledger_db_path(repo)),
     }
