@@ -16,11 +16,11 @@ still returned) over parsing ``*_total_cost_dollars``. Parsing dollars incorrect
 Classifies each settlement to a strategy id:
 
 1. Optional ``settlement_prefixes`` on each strategy in ``strategies.yaml`` (first match wins).
-2. Defaults: ``btc15m`` (KXBTC15M / BTC15M), ``vol_surface`` (KXBTC- hourly),
-   ``weather`` (KXHIGH / KXLOW / KXHIGHT …).
+2. Defaults: ``btc15m`` (KXBTC15M / BTC15M), ``vol_surface`` (KXBTC- hourly **and**
+   KXHIGH / KXLOW / KXHIGHT weather series for the vol dashboard tiles).
 
-Weather vs vol-surface share many tickers; use ``settlement_prefixes`` on one or both
-strategies to split (e.g. list series only your vol bot trades).
+Use ``settlement_prefixes`` on a strategy **before** these defaults (yaml order) to carve
+out tickers for a different strategy id (e.g. a subset on the weather bot card only).
 
 Dedupe key: (ticker, settled_time_iso). New syncs INSERT OR REPLACE so late API updates apply.
 """
@@ -200,6 +200,17 @@ def init_ledger_db(repo: Path) -> None:
             )
             """
         )
+        # Historical rows may still say strategy_id=weather; weather settlements now roll into vol_surface.
+        c.execute(
+            """
+            UPDATE kalshi_settlements
+            SET strategy_id = 'vol_surface'
+            WHERE strategy_id = 'weather'
+              AND (
+                UPPER(ticker) LIKE 'KXHIGH%' OR UPPER(ticker) LIKE 'KXHIGHT%' OR UPPER(ticker) LIKE 'KXLOW%'
+              )
+            """
+        )
         c.commit()
 
 
@@ -239,9 +250,11 @@ def classify_settlement_ticker(ticker: str, strategies: list[dict[str, Any]]) ->
         return "btc15m"
     if u.startswith("KXBTC-"):
         return "vol_surface"
+    # Weather-shaped markets: attribute to vol_surface so dashboard HIGH/LOW tiles and
+    # cumulative match Kalshi (standalone weather bot card uses trades.db when ledger empty).
     for pref in ("KXHIGH", "KXLOW", "KXHIGHT"):
         if u.startswith(pref):
-            return "weather"
+            return "vol_surface"
     return "unassigned"
 
 

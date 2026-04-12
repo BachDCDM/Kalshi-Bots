@@ -32,8 +32,9 @@ strategies:
         - trades
         - errors
 
-  # Optional: settlement_prefixes (uppercase ok) — first strategy match wins.
-  # Use to send weather tickers to vol_surface instead of the default weather bucket.
+  # Optional: settlement_prefixes (uppercase ok) — first strategy match wins (yaml order).
+  # KXHIGH/KXLOW/KXHIGHT default to vol_surface for ledger + dashboard; prefix a row here to
+  # keep specific series on the weather strategy card instead.
   - id: vol_surface
     title: "Vol surface (BTC hourly + weather)"
     systemd_unit: kalshi-vol-surface.service
