@@ -6,6 +6,7 @@ control_panel_unit: kalshi-control-panel.service
 
 # Optional per strategy: kalshi_env_file (relative to repo) for Paper/Live detection. Default .env
 strategies:
+  # Cumulative P&L: settlement ledger when synced (Kalshi truth); else trade_outcomes in trades.db.
   - id: btc15m
     title: "BTC 15m bot"
     systemd_unit: kalshi-btc15m.service

@@ -306,11 +306,11 @@ def _strategy_pnl(
         except HTTPException:
             db_path = None
 
-    # BTC 15m: same realized P&L source as vol surface (trade_outcomes), not settlement ledger.
-    skip_ledger = sid == "btc15m" and "trade_outcomes" in tables
+    # Prefer Kalshi settlement ledger when we have rows for this strategy (correct dual-sided
+    # payout math). Bot ``trade_outcomes`` is session accounting and can diverge; use it only
+    # when the ledger has not synced any settlements for this id yet.
     if (
         sid
-        and not skip_ledger
         and ledger_counts is not None
         and ledger_pnl is not None
         and ledger_counts.get(sid, 0) > 0
