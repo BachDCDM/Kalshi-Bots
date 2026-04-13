@@ -61,8 +61,8 @@ _STATIC_INDEX = _ROOT / "static" / "index.html"
 
 _UNIT_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.service$")
 
-# SQLite table viewer: UI requests are capped; CSV export uses full=1 (up to max rows).
-_SQLITE_UI_MAX_ROWS = 500
+# SQLite table viewer: UI requests are capped (large tables still use CSV for unlimited export).
+_SQLITE_UI_MAX_ROWS = 100_000
 _SQLITE_FULL_EXPORT_MAX_ROWS = 10_000_000
 
 

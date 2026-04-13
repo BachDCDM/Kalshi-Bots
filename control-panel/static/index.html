@@ -84,6 +84,8 @@ function badge(st) {
 
 let strategies = [];
 let overviewTimer = null;
+/** Must stay ≤ app.py ``_SQLITE_UI_MAX_ROWS`` (SQLite table preview; CSV uses ``?full=true``). */
+const SQLITE_TABLE_UI_LIMIT = 100000;
 
 function modeBadgeHtml(mode, label) {
   const m = (mode === 'paper') ? 'paper' : 'live';
@@ -550,7 +552,7 @@ function loadTable(el, sid, table, limit) {
       h += '<button type="button" class="csv-dl-btn">Download CSV (all rows)</button> ';
     }
     h += '<button type="button" class="clear-tbl-btn" style="background:#4d1f1f;color:var(--bad)">Clear all rows</button>';
-    h += ' <span class="hint">Table shows newest ' + escapeHtml(String(limit || 200)) + ' rows; CSV is a full export. Times in ET (stored UTC)</span></p>';
+    h += ' <span class="hint">Showing ' + rowList.length + ' row(s) (up to ' + Number(limit || 200).toLocaleString() + ' loaded). CSV is a full export with no row cap. Times in ET (stored UTC)</span></p>';
     if (db.config_path) {
       h += '<p class="hint">DB: <code>' + escapeHtml(db.resolved_path || db.config_path) + '</code></p>';
     }
@@ -755,13 +757,13 @@ function buildStrategyPage(s) {
         const name = btn.dataset.sub;
         panels.forEach((p) => p.classList.toggle('on', p.dataset.subpanel === name));
         if (name === 'logs') loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
-        if (name === 'trades') loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', 250);
-        if (name === 'order-events') loadTable(div.querySelector('[data-role="btc-order-events"]'), id, 'btc_order_events', 250);
+        if (name === 'trades') loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', SQLITE_TABLE_UI_LIMIT);
+        if (name === 'order-events') loadTable(div.querySelector('[data-role="btc-order-events"]'), id, 'btc_order_events', SQLITE_TABLE_UI_LIMIT);
         if (name === 'hourly') renderBtcHourly(div.querySelector('[data-role="btc-hourly"]'), id);
       };
     });
     loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
-    loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', 250);
+    loadTable(div.querySelector('[data-role="btc-table"]'), id, 'btc_sessions', SQLITE_TABLE_UI_LIMIT);
   } else if (s.has_journal) {
     loadLog(div.querySelector('[data-role="journal"]'), id, s.journal_lines || 400);
   }
