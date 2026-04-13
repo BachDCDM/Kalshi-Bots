@@ -61,6 +61,10 @@ _STATIC_INDEX = _ROOT / "static" / "index.html"
 
 _UNIT_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.service$")
 
+# SQLite table viewer: UI requests are capped; CSV export uses full=1 (up to max rows).
+_SQLITE_UI_MAX_ROWS = 500
+_SQLITE_FULL_EXPORT_MAX_ROWS = 10_000_000
+
 
 def _strategies_yaml() -> dict[str, Any]:
     if not _STRATEGIES_PATH.is_file():
@@ -249,9 +253,10 @@ def _sqlite_rows(db_path: Path, table: str, limit: int) -> tuple[list[str], list
         cols = [row[1] for row in cur.fetchall()]
         if not cols:
             return [], []
+        lim = min(max(limit, 1), _SQLITE_FULL_EXPORT_MAX_ROWS)
         cur = conn.execute(
             f'SELECT * FROM "{table}" ORDER BY rowid DESC LIMIT ?',
-            (limit,),
+            (lim,),
         )
         rows = cur.fetchall()
         return cols, rows
@@ -591,7 +596,15 @@ def strategy_logs(sid: str, lines: int = 200) -> dict[str, str]:
 
 
 @app.get("/api/strategies/{sid}/tables/{table}")
-def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
+def strategy_table(
+    sid: str,
+    table: str,
+    limit: int = 100,
+    full: bool = Query(
+        False,
+        description="Return up to all rows for CSV export (ignores UI cap).",
+    ),
+) -> dict[str, Any]:
     s = _strategy_by_id(sid)
     sq = _sqlite_block(s)
     if not sq or not sq.get("path"):
@@ -601,7 +614,10 @@ def strategy_table(sid: str, table: str, limit: int = 100) -> dict[str, Any]:
     allowed = set(sq.get("tables") or [])
     if table not in allowed:
         raise HTTPException(status_code=404, detail="Table not configured")
-    lim = min(max(limit, 1), 500)
+    if full:
+        lim = _SQLITE_FULL_EXPORT_MAX_ROWS
+    else:
+        lim = min(max(limit, 1), _SQLITE_UI_MAX_ROWS)
     try:
         rel_display = str(db_path.resolve().relative_to(_REPO.resolve()))
     except ValueError:

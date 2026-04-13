@@ -547,17 +547,36 @@ function loadTable(el, sid, table, limit) {
     h += '</tbody></table></div>';
     h += '<p class="hint" style="margin-top:0.5rem">';
     if (rowList.length) {
-      h += '<button type="button" class="csv-dl-btn">Download CSV</button> ';
+      h += '<button type="button" class="csv-dl-btn">Download CSV (all rows)</button> ';
     }
     h += '<button type="button" class="clear-tbl-btn" style="background:#4d1f1f;color:var(--bad)">Clear all rows</button>';
-    h += ' <span class="hint">Times shown in ET (stored UTC)</span></p>';
+    h += ' <span class="hint">Table shows newest ' + escapeHtml(String(limit || 200)) + ' rows; CSV is a full export. Times in ET (stored UTC)</span></p>';
     if (db.config_path) {
       h += '<p class="hint">DB: <code>' + escapeHtml(db.resolved_path || db.config_path) + '</code></p>';
     }
     el.innerHTML = h;
     var dlBtn = el.querySelector('.csv-dl-btn');
     if (dlBtn) {
-      dlBtn.onclick = function () { downloadCsv(j.columns, rowList, sid + '_' + table); };
+      dlBtn.onclick = function () {
+        var prev = dlBtn.textContent;
+        dlBtn.disabled = true;
+        dlBtn.textContent = 'Preparing…';
+        api('/api/strategies/' + sid + '/tables/' + table + '?full=true')
+          .then(function (fj) {
+            dlBtn.disabled = false;
+            dlBtn.textContent = prev;
+            if (fj.sqlite_error) {
+              alert('CSV export failed: ' + fj.sqlite_error);
+              return;
+            }
+            downloadCsv(fj.columns || [], fj.rows || [], sid + '_' + table);
+          })
+          .catch(function (e) {
+            dlBtn.disabled = false;
+            dlBtn.textContent = prev;
+            alert('CSV export failed: ' + e);
+          });
+      };
     }
     var clrBtn = el.querySelector('.clear-tbl-btn');
     if (clrBtn) {
