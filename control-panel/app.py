@@ -32,9 +32,12 @@ from btc15m_prefs import (
     MAX_CONTRACTS,
     MIN_CONTRACTS,
     contracts_pair_from_prefs,
+    load_prefs,
     prefs_path,
+    save_btc15m_prefs,
     save_contracts,
     save_contracts_pair,
+    validate_and_normalize_hour_groups,
 )
 from kalshi_readout import (
     get_balance_cache,
@@ -582,6 +585,10 @@ def btc_contracts_get(sid: str) -> dict[str, Any]:
     else:
         eff_y, eff_n = env_yes, env_no
         from_panel = False
+    raw = load_prefs(repo)
+    hour_groups = raw.get("hour_groups")
+    if not isinstance(hour_groups, list):
+        hour_groups = []
     return {
         "contracts_yes": eff_y,
         "contracts_no": eff_n,
@@ -594,6 +601,7 @@ def btc_contracts_get(sid: str) -> dict[str, Any]:
         "min": MIN_CONTRACTS,
         "max": MAX_CONTRACTS,
         "prefs_path": str(prefs_path(repo)),
+        "hour_groups": hour_groups,
     }
 
 
@@ -612,7 +620,11 @@ def btc_contracts_post(sid: str, body: dict[str, Any] = Body(default_factory=dic
     if "contracts" in body and "contracts_yes" not in body and "contracts_no" not in body:
         ey = en = body["contracts"]
     try:
-        save_contracts_pair(repo, int(ey), int(en))
+        if "hour_groups" in body:
+            hg = validate_and_normalize_hour_groups(body["hour_groups"])
+            save_btc15m_prefs(repo, contracts_yes=int(ey), contracts_no=int(en), hour_groups=hg)
+        else:
+            save_contracts_pair(repo, int(ey), int(en))
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return btc_contracts_get(sid)

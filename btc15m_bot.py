@@ -53,6 +53,18 @@ from kalshi_python_sync.exceptions import NotFoundException
 LOG = logging.getLogger("btc15m_bot")
 
 _ROOT = Path(__file__).resolve().parent
+_CP_DIR = _ROOT / "control-panel"
+if _CP_DIR.is_dir() and str(_CP_DIR) not in sys.path:
+    sys.path.insert(0, str(_CP_DIR))
+try:
+    from btc15m_prefs import effective_contracts_for_market_open, load_prefs
+except ImportError:
+    def load_prefs(repo: Path) -> dict:  # type: ignore[misc]
+        return {}
+
+    def effective_contracts_for_market_open(open_t_utc, prefs, base_yes, base_no):  # type: ignore[misc]
+        return base_yes, base_no, None
+
 load_dotenv(_ROOT / ".env", override=False)
 _extra = (os.environ.get("KALSHI_USE_ENV_FILE") or "").strip()
 if _extra:
@@ -1194,15 +1206,23 @@ def run_session(
     ticker = m.ticker
     open_t = _parse_ts(m.open_time)
     close_t = _parse_ts(m.close_time)
+    base_cy, base_cn = contracts_yes, contracts_no
+    prefs = load_prefs(_ROOT)
+    contracts_yes, contracts_no, hour_group_label = effective_contracts_for_market_open(
+        open_t, prefs, base_cy, base_cn
+    )
     entry_end = open_t + timedelta(minutes=entry_window_minutes)
 
     session = Session(market_ticker=ticker)
     LOG.info(
-        "Market %s | open=%s close=%s | entry phase ends %s",
+        "Market %s | open=%s close=%s | entry phase ends %s | contracts YES=%d NO=%d%s",
         ticker,
         open_t.isoformat(),
         close_t.isoformat(),
         entry_end.isoformat(),
+        contracts_yes,
+        contracts_no,
+        f" (ET hour group: {hour_group_label})" if hour_group_label else "",
     )
 
     last_debug_wall_minute: Optional[int] = None

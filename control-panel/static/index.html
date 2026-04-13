@@ -613,12 +613,107 @@ function wireControls(cardRoot, s) {
   });
 }
 
+function _btcHourGroupRowHtml() {
+  const inp =
+    'style="padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit"';
+  return (
+    '<div data-btc-hour-group-row style="display:flex;flex-wrap:wrap;gap:0.4rem 0.65rem;align-items:center;margin-bottom:0.5rem;padding:0.5rem;border:1px solid #2d3a4f;border-radius:8px;background:#0b0f14">' +
+    '<input data-hg-name type="text" placeholder="Label (optional)" ' + inp + ' style="min-width:9rem;padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit" />' +
+    '<span style="font-size:0.75rem;color:var(--muted)">Hours</span>' +
+    '<input data-hg-hours type="text" placeholder="e.g. 1,2,14" title="Comma-separated hours 0–23 ET" ' +
+    inp + ' style="width:7.5rem" />' +
+    '<label style="font-size:0.75rem;color:var(--muted)">YES</label>' +
+    '<input data-hg-yes type="number" min="1" max="5000" ' + inp + ' style="width:4.25rem" />' +
+    '<label style="font-size:0.75rem;color:var(--muted)">NO</label>' +
+    '<input data-hg-no type="number" min="1" max="5000" ' + inp + ' style="width:4.25rem" />' +
+    '<button type="button" data-hg-remove>Remove</button></div>'
+  );
+}
+
+function _collectBtcHourGroups(rowsHost) {
+  const rows = rowsHost.querySelectorAll('[data-btc-hour-group-row]');
+  const out = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const name = (row.querySelector('[data-hg-name]') && row.querySelector('[data-hg-name]').value) || '';
+    const hoursStr = (row.querySelector('[data-hg-hours]') && row.querySelector('[data-hg-hours]').value.trim()) || '';
+    const y = parseInt(row.querySelector('[data-hg-yes]') && row.querySelector('[data-hg-yes]').value, 10);
+    const n = parseInt(row.querySelector('[data-hg-no]') && row.querySelector('[data-hg-no]').value, 10);
+    if (!hoursStr) continue;
+    const parts = hoursStr.split(/[\s,]+/).filter(Boolean);
+    const hours = [];
+    for (const p of parts) {
+      const h = parseInt(p, 10);
+      if (!isFinite(h) || h < 0 || h > 23) {
+        alert('Invalid hour: ' + p + ' (use integers 0–23 ET)');
+        return null;
+      }
+      if (seen.has(h)) {
+        alert('Hour ' + h + ' appears more than once (across groups or duplicated in one field)');
+        return null;
+      }
+      seen.add(h);
+      hours.push(h);
+    }
+    if (!hours.length) continue;
+    if (!isFinite(y) || !isFinite(n) || y < 1 || n < 1) {
+      alert('Each hour group needs valid YES and NO contract counts (≥ 1)');
+      return null;
+    }
+    hours.sort((a, b) => a - b);
+    out.push({
+      name: (name && String(name).trim()) || 'group_' + (out.length + 1),
+      hours: hours,
+      contracts_yes: y,
+      contracts_no: n,
+    });
+  }
+  return out;
+}
+
+function _renderBtcHourGroups(rowsHost, groups) {
+  rowsHost.innerHTML = '';
+  const list = Array.isArray(groups) ? groups : [];
+  if (!list.length) return;
+  for (const g of list) {
+    rowsHost.insertAdjacentHTML('beforeend', _btcHourGroupRowHtml());
+    const row = rowsHost.lastElementChild;
+    if (row.querySelector('[data-hg-name]')) row.querySelector('[data-hg-name]').value = g.name || '';
+    if (row.querySelector('[data-hg-hours]') && Array.isArray(g.hours)) {
+      row.querySelector('[data-hg-hours]').value = g.hours.join(',');
+    }
+    if (row.querySelector('[data-hg-yes]')) row.querySelector('[data-hg-yes]').value = String(g.contracts_yes != null ? g.contracts_yes : '');
+    if (row.querySelector('[data-hg-no]')) row.querySelector('[data-hg-no]').value = String(g.contracts_no != null ? g.contracts_no : '');
+  }
+}
+
 function loadBtcContracts(cardRoot, sid) {
   const inY = cardRoot.querySelector('[data-btc-contracts-yes]');
   const inN = cardRoot.querySelector('[data-btc-contracts-no]');
   const st = cardRoot.querySelector('[data-btc-contracts-status]');
   const hint = cardRoot.querySelector('[data-btc-contracts-hint]');
+  const wrap = cardRoot.querySelector('[data-btc-hour-groups-wrap]');
+  const rowsHost = cardRoot.querySelector('[data-btc-hour-groups-rows]');
+  const addBtn = cardRoot.querySelector('[data-btc-hour-group-add]');
   if (!inY || !inN) return;
+
+  function wireRemoveHandlers() {
+    if (!rowsHost) return;
+    rowsHost.querySelectorAll('[data-hg-remove]').forEach((b) => {
+      b.onclick = () => {
+        const row = b.closest('[data-btc-hour-group-row]');
+        if (row) row.remove();
+      };
+    });
+  }
+
+  if (addBtn && rowsHost) {
+    addBtn.onclick = () => {
+      rowsHost.insertAdjacentHTML('beforeend', _btcHourGroupRowHtml());
+      wireRemoveHandlers();
+    };
+  }
+
   api('/api/strategies/' + sid + '/btc-contracts').then((j) => {
     const lo = String(j.min != null ? j.min : 1);
     const hi = String(j.max != null ? j.max : 5000);
@@ -628,9 +723,13 @@ function loadBtcContracts(cardRoot, sid) {
     inN.max = hi;
     inY.value = String(j.contracts_yes != null ? j.contracts_yes : j.contracts);
     inN.value = String(j.contracts_no != null ? j.contracts_no : j.contracts);
+    if (rowsHost) {
+      _renderBtcHourGroups(rowsHost, j.hour_groups);
+      wireRemoveHandlers();
+    }
     if (hint) {
       hint.textContent = j.from_panel_file
-        ? 'Panel override is active (replaces KALSHI_CONTRACTS / KALSHI_CONTRACTS_YES / KALSHI_CONTRACTS_NO in .env). Exit sell size follows each leg’s fills. Restart the bot after changing.'
+        ? 'Panel override is active (replaces KALSHI_CONTRACTS / KALSHI_CONTRACTS_YES / KALSHI_CONTRACTS_NO in .env). Hour groups use ET. Exit sell size follows each leg’s fills. Restart the bot after changing.'
         : 'Using .env until you save. Per-side entry sizes; exit limits match filled quantity on each side only.';
     }
     if (st) st.textContent = '';
@@ -644,14 +743,24 @@ function loadBtcContracts(cardRoot, sid) {
         alert('Enter valid contract counts (YES and NO, each ≥ 1)');
         return;
       }
+      let hour_groups = [];
+      if (rowsHost) {
+        const collected = _collectBtcHourGroups(rowsHost);
+        if (collected === null) return;
+        hour_groups = collected;
+      }
       try {
         const j = await api('/api/strategies/' + sid + '/btc-contracts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contracts_yes: y, contracts_no: n }),
+          body: JSON.stringify({ contracts_yes: y, contracts_no: n, hour_groups: hour_groups }),
         });
         inY.value = String(j.contracts_yes);
         inN.value = String(j.contracts_no);
+        if (rowsHost) {
+          _renderBtcHourGroups(rowsHost, j.hour_groups);
+          wireRemoveHandlers();
+        }
         if (st) st.textContent = 'Saved. Restart the bot to apply.';
         if (hint) hint.textContent = 'Panel override active. Restart BTC 15m.';
       } catch (e) { alert(e); }
@@ -693,6 +802,13 @@ function buildStrategyPage(s) {
     inner += '<button type="button" data-save-btc-contracts>Save</button> ';
     inner += '<span class="hint" data-btc-contracts-status></span></div>';
     inner += '<p class="hint" data-btc-contracts-hint style="margin-top:0.2rem"></p>';
+    inner += '<div data-btc-hour-groups-wrap style="margin-top:0.75rem;font-size:0.875rem">';
+    inner += '<div style="font-weight:600;margin-bottom:0.35rem">Hour overrides (ET)</div>';
+    inner += '<p class="hint" style="margin:0 0 0.5rem;max-width:42rem">Uses the market <strong>open</strong> time in America/New_York (hour 0–23). ';
+    inner += 'If that hour is not in any group, the base YES/NO sizes above apply. Each hour may appear in only one group.</p>';
+    inner += '<div data-btc-hour-groups-rows></div>';
+    inner += '<button type="button" data-btc-hour-group-add style="margin-top:0.25rem">Add hour group</button>';
+    inner += '</div>';
   }
 
   if (isVolSurface) {
