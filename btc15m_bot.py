@@ -26,6 +26,10 @@ Environment (or use a ``.env`` file next to this script — see ``.env.example``
 Optional:
   KALSHI_HOST — default https://api.elections.kalshi.com/trade-api/v2
   (use demo: https://demo-api.kalshi.co/trade-api/v2)
+  KALSHI_CONTRACTS — default size for both YES and NO entry orders (default 30)
+  KALSHI_CONTRACTS_YES — override YES leg only (else same as KALSHI_CONTRACTS)
+  KALSHI_CONTRACTS_NO — override NO leg only (else same as KALSHI_CONTRACTS)
+  Control panel ``btc15m_prefs.json`` overrides all of the above when present.
 """
 
 from __future__ import annotations
@@ -803,7 +807,8 @@ def _place_entry(
     client: KalshiClient,
     session: Session,
     ticker: str,
-    contracts: int,
+    contracts_yes: int,
+    contracts_no: int,
     entry_cents: int,
 ) -> None:
     if session.entries_submitted:
@@ -811,9 +816,9 @@ def _place_entry(
     session.entries_submitted = True
     LOG.info(
         "[TRADE] Submitting ENTRY buy YES x%d @ %dc | buy NO x%d @ %dc | %s",
-        contracts,
+        contracts_yes,
         entry_cents,
-        contracts,
+        contracts_no,
         entry_cents,
         ticker,
     )
@@ -827,7 +832,7 @@ def _place_entry(
             client_order_id=session.cid_yes(),
             side="yes",
             action="buy",
-            count=contracts,
+            count=contracts_yes,
             yes_price=entry_cents,
             time_in_force="good_till_canceled",
         )
@@ -836,6 +841,17 @@ def _place_entry(
         LOG.exception("[TRADE] YES entry order failed after %d attempts", _ENTRY_ORDER_RETRIES)
         session.entries_submitted = False
         raise
+
+    _append_btc_order_event(
+        "entry_yes",
+        market_ticker=ticker,
+        session_id=session.session_id,
+        order_id=session.yes_order_id,
+        order_id_secondary=None,
+        side="yes",
+        count=contracts_yes,
+        price_cents=entry_cents,
+    )
 
     try:
         no = _create_order_with_retry(
@@ -847,7 +863,7 @@ def _place_entry(
             client_order_id=session.cid_no(),
             side="no",
             action="buy",
-            count=contracts,
+            count=contracts_no,
             no_price=entry_cents,
             time_in_force="good_till_canceled",
         )
@@ -868,20 +884,21 @@ def _place_entry(
         session.entries_submitted = False
         raise
 
+    _append_btc_order_event(
+        "entry_no",
+        market_ticker=ticker,
+        session_id=session.session_id,
+        order_id=session.no_order_id,
+        order_id_secondary=None,
+        side="no",
+        count=contracts_no,
+        price_cents=entry_cents,
+    )
+
     LOG.info(
         "[TRADE] Entry orders live | YES order_id=%s | NO order_id=%s",
         session.yes_order_id,
         session.no_order_id,
-    )
-    _append_btc_order_event(
-        "entry_pair",
-        market_ticker=ticker,
-        session_id=session.session_id,
-        order_id=session.yes_order_id,
-        order_id_secondary=session.no_order_id,
-        side=None,
-        count=contracts,
-        price_cents=entry_cents,
     )
 
 
@@ -1162,7 +1179,8 @@ def run_session(
     client: KalshiClient,
     *,
     series_ticker: str,
-    contracts: int,
+    contracts_yes: int,
+    contracts_no: int,
     entry_cents: int,
     exit_cents: int,
     entry_window_minutes: int,
@@ -1205,7 +1223,7 @@ def run_session(
 
         if now >= open_t and not session.entries_submitted:
             if now <= entry_end:
-                _place_entry(client, session, ticker, contracts, entry_cents)
+                _place_entry(client, session, ticker, contracts_yes, contracts_no, entry_cents)
             else:
                 LOG.info("Joined after entry window; skipping entry placement.")
                 session.entries_submitted = True
@@ -1241,10 +1259,10 @@ def run_session(
         _log_btc_session_row(client, session, ticker, open_t, close_t, entry_cents, exit_cents)
 
 
-def _contracts_from_control_panel_prefs() -> int | None:
+def _contract_pair_from_control_panel_prefs() -> tuple[int, int] | None:
     """
-    Optional override from control-panel/data/btc15m_prefs.json (written by dashboard).
-    Same path relative to repo root as btc15m_bot.py parent.
+    Optional (yes, no) from control-panel/data/btc15m_prefs.json (written by dashboard).
+    Legacy single ``contracts`` applies to both sides.
     """
     import json
 
@@ -1253,13 +1271,18 @@ def _contracts_from_control_panel_prefs() -> int | None:
         if not p.is_file():
             return None
         d = json.loads(p.read_text(encoding="utf-8"))
+        if "contracts_yes" in d and "contracts_no" in d:
+            y, n = int(d["contracts_yes"]), int(d["contracts_no"])
+            if 1 <= y <= 5000 and 1 <= n <= 5000:
+                return y, n
+            return None
         c = d.get("contracts")
         if c is None:
             return None
         n = int(c)
         if n < 1 or n > 5000:
             return None
-        return n
+        return n, n
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
@@ -1270,10 +1293,22 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     series = os.environ.get("KALSHI_SERIES_TICKER", "KXBTC15M")
-    contracts = int(os.environ.get("KALSHI_CONTRACTS", "30"))
-    panel_c = _contracts_from_control_panel_prefs()
-    if panel_c is not None:
-        contracts = panel_c
+    base = int(os.environ.get("KALSHI_CONTRACTS", "30"))
+    cy_env = os.environ.get("KALSHI_CONTRACTS_YES", "").strip()
+    cn_env = os.environ.get("KALSHI_CONTRACTS_NO", "").strip()
+    try:
+        contracts_yes = int(cy_env) if cy_env else base
+    except ValueError:
+        contracts_yes = base
+    try:
+        contracts_no = int(cn_env) if cn_env else base
+    except ValueError:
+        contracts_no = base
+    panel_pair = _contract_pair_from_control_panel_prefs()
+    panel_from_file = False
+    if panel_pair is not None:
+        contracts_yes, contracts_no = panel_pair
+        panel_from_file = True
     entry_cents = int(os.environ.get("KALSHI_ENTRY_CENTS", "25"))
     exit_cents = int(os.environ.get("KALSHI_EXIT_CENTS", "50"))
     entry_min = int(os.environ.get("KALSHI_ENTRY_WINDOW_MINUTES", "5"))
@@ -1282,13 +1317,14 @@ def main() -> None:
     client = _load_client()
     _init_trade_db()
     LOG.info(
-        "BTC 15m bot | series=%s contracts=%d entry=%dc exit=%dc window=%dm%s",
+        "BTC 15m bot | series=%s contracts YES=%d NO=%d entry=%dc exit=%dc window=%dm%s",
         series,
-        contracts,
+        contracts_yes,
+        contracts_no,
         entry_cents,
         exit_cents,
         entry_min,
-        " (from control panel prefs)" if panel_c is not None else "",
+        " (from control panel prefs)" if panel_from_file else "",
     )
 
     while True:
@@ -1296,7 +1332,8 @@ def main() -> None:
             run_session(
                 client,
                 series_ticker=series,
-                contracts=contracts,
+                contracts_yes=contracts_yes,
+                contracts_no=contracts_no,
                 entry_cents=entry_cents,
                 exit_cents=exit_cents,
                 entry_window_minutes=entry_min,

@@ -31,9 +31,10 @@ from settlement_sync import (
 from btc15m_prefs import (
     MAX_CONTRACTS,
     MIN_CONTRACTS,
-    contracts_from_prefs,
+    contracts_pair_from_prefs,
     prefs_path,
     save_contracts,
+    save_contracts_pair,
 )
 from kalshi_readout import (
     get_balance_cache,
@@ -547,23 +548,49 @@ def restart_strategy(sid: str) -> dict[str, str]:
     return {"ok": "true", "unit": unit}
 
 
+def _btc_env_contract_pair(vals: dict[str, Any]) -> tuple[int, int, int]:
+    """Returns (base, yes, no) from .env: optional KALSHI_CONTRACTS_YES/NO override base KALSHI_CONTRACTS."""
+    raw = (vals.get("KALSHI_CONTRACTS") or "").strip()
+    try:
+        base = int(raw) if raw else 30
+    except ValueError:
+        base = 30
+    cy = (vals.get("KALSHI_CONTRACTS_YES") or "").strip()
+    cn = (vals.get("KALSHI_CONTRACTS_NO") or "").strip()
+    try:
+        env_yes = int(cy) if cy else base
+    except ValueError:
+        env_yes = base
+    try:
+        env_no = int(cn) if cn else base
+    except ValueError:
+        env_no = base
+    return base, env_yes, env_no
+
+
 @app.get("/api/strategies/{sid}/btc-contracts")
 def btc_contracts_get(sid: str) -> dict[str, Any]:
     if sid != "btc15m":
         raise HTTPException(status_code=400, detail="Only btc15m supports contract prefs")
     repo = _REPO.resolve()
     vals = load_strategy_env_map(repo, ".env")
-    raw = (vals.get("KALSHI_CONTRACTS") or "").strip()
-    try:
-        env_contracts = int(raw) if raw else 30
-    except ValueError:
-        env_contracts = 30
-    file_contracts = contracts_from_prefs(repo)
-    effective = file_contracts if file_contracts is not None else env_contracts
+    base, env_yes, env_no = _btc_env_contract_pair(vals)
+    fy, fn = contracts_pair_from_prefs(repo)
+    if fy is not None and fn is not None:
+        eff_y, eff_n = fy, fn
+        from_panel = True
+    else:
+        eff_y, eff_n = env_yes, env_no
+        from_panel = False
     return {
-        "contracts": effective,
-        "from_panel_file": file_contracts is not None,
-        "env_kalshi_contracts": env_contracts,
+        "contracts_yes": eff_y,
+        "contracts_no": eff_n,
+        "contracts": eff_y,
+        "contracts_legacy": eff_y,
+        "from_panel_file": from_panel,
+        "env_kalshi_contracts": base,
+        "env_contracts_yes": env_yes,
+        "env_contracts_no": env_no,
         "min": MIN_CONTRACTS,
         "max": MAX_CONTRACTS,
         "prefs_path": str(prefs_path(repo)),
@@ -574,11 +601,18 @@ def btc_contracts_get(sid: str) -> dict[str, Any]:
 def btc_contracts_post(sid: str, body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     if sid != "btc15m":
         raise HTTPException(status_code=400, detail="Only btc15m supports contract prefs")
-    c = body.get("contracts")
-    if c is None:
-        raise HTTPException(status_code=400, detail="Missing contracts")
+    repo = _REPO.resolve()
+    cur = btc_contracts_get(sid)
+    ey = int(cur["contracts_yes"])
+    en = int(cur["contracts_no"])
+    if "contracts_yes" in body:
+        ey = body["contracts_yes"]
+    if "contracts_no" in body:
+        en = body["contracts_no"]
+    if "contracts" in body and "contracts_yes" not in body and "contracts_no" not in body:
+        ey = en = body["contracts"]
     try:
-        save_contracts(_REPO.resolve(), int(c))
+        save_contracts_pair(repo, int(ey), int(en))
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return btc_contracts_get(sid)

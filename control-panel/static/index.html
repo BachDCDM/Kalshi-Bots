@@ -614,33 +614,44 @@ function wireControls(cardRoot, s) {
 }
 
 function loadBtcContracts(cardRoot, sid) {
-  const inp = cardRoot.querySelector('[data-btc-contracts-input]');
+  const inY = cardRoot.querySelector('[data-btc-contracts-yes]');
+  const inN = cardRoot.querySelector('[data-btc-contracts-no]');
   const st = cardRoot.querySelector('[data-btc-contracts-status]');
   const hint = cardRoot.querySelector('[data-btc-contracts-hint]');
-  if (!inp) return;
+  if (!inY || !inN) return;
   api('/api/strategies/' + sid + '/btc-contracts').then((j) => {
-    inp.min = String(j.min != null ? j.min : 1);
-    inp.max = String(j.max != null ? j.max : 5000);
-    inp.value = String(j.contracts);
+    const lo = String(j.min != null ? j.min : 1);
+    const hi = String(j.max != null ? j.max : 5000);
+    inY.min = lo;
+    inY.max = hi;
+    inN.min = lo;
+    inN.max = hi;
+    inY.value = String(j.contracts_yes != null ? j.contracts_yes : j.contracts);
+    inN.value = String(j.contracts_no != null ? j.contracts_no : j.contracts);
     if (hint) {
       hint.textContent = j.from_panel_file
-        ? 'Panel override is active (replaces KALSHI_CONTRACTS in .env). Restart the bot after changing.'
-        : 'Using .env KALSHI_CONTRACTS until you save a value here.';
+        ? 'Panel override is active (replaces KALSHI_CONTRACTS / KALSHI_CONTRACTS_YES / KALSHI_CONTRACTS_NO in .env). Exit sell size follows each leg’s fills. Restart the bot after changing.'
+        : 'Using .env until you save. Per-side entry sizes; exit limits match filled quantity on each side only.';
     }
     if (st) st.textContent = '';
   }).catch((e) => { if (st) st.textContent = String(e); });
   const btn = cardRoot.querySelector('[data-save-btc-contracts]');
   if (btn) {
     btn.onclick = async () => {
-      const n = parseInt(String(inp.value), 10);
-      if (!isFinite(n) || n < 1) { alert('Enter a valid contract count'); return; }
+      const y = parseInt(String(inY.value), 10);
+      const n = parseInt(String(inN.value), 10);
+      if (!isFinite(y) || y < 1 || !isFinite(n) || n < 1) {
+        alert('Enter valid contract counts (YES and NO, each ≥ 1)');
+        return;
+      }
       try {
         const j = await api('/api/strategies/' + sid + '/btc-contracts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contracts: n }),
+          body: JSON.stringify({ contracts_yes: y, contracts_no: n }),
         });
-        inp.value = String(j.contracts);
+        inY.value = String(j.contracts_yes);
+        inN.value = String(j.contracts_no);
         if (st) st.textContent = 'Saved. Restart the bot to apply.';
         if (hint) hint.textContent = 'Panel override active. Restart BTC 15m.';
       } catch (e) { alert(e); }
@@ -671,10 +682,14 @@ function buildStrategyPage(s) {
   inner += '<button class="primary" data-a="start">Start</button><button data-a="stop">Stop</button><button data-a="restart">Restart</button></div>';
 
   if (isBtc) {
-    inner += '<div class="row" style="margin-top:0.65rem;align-items:center;flex-wrap:wrap;gap:0.5rem">';
-    inner += '<label for="btc-c-' + id + '" style="font-size:0.875rem">Contracts per market</label>';
-    inner += '<input id="btc-c-' + id + '" type="number" data-btc-contracts-input min="1" max="5000" ';
-    inner += 'style="width:5.5rem;padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit" /> ';
+    inner += '<div class="row" style="margin-top:0.65rem;align-items:center;flex-wrap:wrap;gap:0.5rem 0.75rem">';
+    inner += '<span style="font-size:0.875rem">Contracts per market</span>';
+    inner += '<label for="btc-cy-' + id + '" style="font-size:0.8rem;color:var(--muted)">YES</label>';
+    inner += '<input id="btc-cy-' + id + '" type="number" data-btc-contracts-yes min="1" max="5000" ';
+    inner += 'style="width:5rem;padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit" title="Buy YES entry size" />';
+    inner += '<label for="btc-cn-' + id + '" style="font-size:0.8rem;color:var(--muted)">NO</label>';
+    inner += '<input id="btc-cn-' + id + '" type="number" data-btc-contracts-no min="1" max="5000" ';
+    inner += 'style="width:5rem;padding:0.35rem;border-radius:6px;border:1px solid #2d3a4f;background:#0b0f14;color:inherit" title="Buy NO entry size" />';
     inner += '<button type="button" data-save-btc-contracts>Save</button> ';
     inner += '<span class="hint" data-btc-contracts-status></span></div>';
     inner += '<p class="hint" data-btc-contracts-hint style="margin-top:0.2rem"></p>';
