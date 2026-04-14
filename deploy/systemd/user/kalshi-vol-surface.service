@@ -9,6 +9,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/kalshi-trading
 EnvironmentFile=-%h/kalshi-trading/.env
+# Weather-only (disable BTC hourly in this process): uncomment next line, then daemon-reload + restart.
+# Environment=VOL_SURFACE_SKIP_BTC_HOURLY=1
 ExecStart=%h/kalshi-trading/.venv/bin/python -m vol_surface_strategy.main
 Restart=on-failure
 RestartSec=12

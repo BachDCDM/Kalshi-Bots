@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Set, Tuple, cast
@@ -57,6 +58,12 @@ from vol_surface_strategy.tracker import (
 )
 
 LOG = setup_logging()
+
+
+def _btc_hourly_enabled() -> bool:
+    """Set ``VOL_SURFACE_SKIP_BTC_HOURLY=1`` (or ``true``/``yes``/``on``) to run weather only."""
+    v = (os.environ.get("VOL_SURFACE_SKIP_BTC_HOURLY") or "").strip().lower()
+    return v not in ("1", "true", "yes", "on")
 
 
 def _market_type_for_key(key: str) -> str:
@@ -724,12 +731,13 @@ def tick(dry_run: bool) -> None:
     if now.minute == 0 and now.second < 28:
         prune_old_logs(90)
 
-    _resolve_prev_btc_hour(now)
+    if _btc_hourly_enabled():
+        _resolve_prev_btc_hour(now)
     _weather_snap_high_closes(client, dry_run, now)
     _weather_snap_low_closes(client, dry_run, now)
-    _btc_snap_close(client, dry_run, now)
-
-    _btc_monitor_cycle(client, dry_run, now)
+    if _btc_hourly_enabled():
+        _btc_snap_close(client, dry_run, now)
+        _btc_monitor_cycle(client, dry_run, now)
 
     for cid in CITIES:
         _weather_monitor_cycle(client, dry_run, now, cid, "HIGH")
@@ -744,7 +752,11 @@ def run_forever(*, dry_run: bool = False, interval_sec: float = 12.0) -> None:
         init_panel_db()
     except Exception:
         LOG.debug("panel db init failed", exc_info=True)
-    LOG.info("Vol surface runner started dry_run=%s (5-min monitor loop)", dry_run)
+    LOG.info(
+        "Vol surface runner started dry_run=%s (5-min monitor loop)%s",
+        dry_run,
+        " [BTC hourly disabled: VOL_SURFACE_SKIP_BTC_HOURLY]" if not _btc_hourly_enabled() else "",
+    )
     while True:
         try:
             tick(dry_run)
