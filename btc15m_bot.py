@@ -9,8 +9,9 @@ so the control panel can sum realized cents the same way as vol surface.
 The same database has ``btc_order_events``: one row when entry YES/NO orders are placed and
 one per exit order, so you can confirm API placement before the session closes.
 
-``success`` is 1 only when all three conditions hold: an exit was placed (``exit_handled``),
-at least one entry leg filled, AND the exit order itself filled (``exit_fill_count > 0``).
+``success`` is 1 when an exit was placed (``exit_handled``), at least one entry leg filled,
+and total exit sells (``exit_fill_count``) cover the entry size. Partial exit fills followed by
+cancellation trigger additional exit orders until flat or the market closes.
 This confirms the take-profit actually executed, not just that it was placed. ``lowest_yes_mid_cents_first5`` is the minimum YES midpoint (¢) sampled
 during the entry window after open.
 
@@ -192,6 +193,11 @@ class Session:
     no_order_id: Optional[str] = None
     sell_yes_order_id: Optional[str] = None
     sell_no_order_id: Optional[str] = None
+    sell_yes_order_count: int = 0
+    sell_no_order_count: int = 0
+    exit_order_seq: int = 0
+    exit_yes_order_ids: list[str] = field(default_factory=list)
+    exit_no_order_ids: list[str] = field(default_factory=list)
     entries_submitted: bool = False
     exit_handled: bool = False
     post_entry_cleanup_done: bool = False
@@ -205,11 +211,11 @@ class Session:
     def cid_no(self) -> str:
         return f"b15m-{self.session_id}-n"
 
-    def cid_sell_yes(self) -> str:
-        return f"b15m-{self.session_id}-sy"
-
-    def cid_sell_no(self) -> str:
-        return f"b15m-{self.session_id}-sn"
+    def next_exit_client_order_id(self, side: str) -> str:
+        """Unique id per exit placement so retries after partial cancel do not collide."""
+        self.exit_order_seq += 1
+        suf = "sy" if side == "yes" else "sn"
+        return f"b15m-{self.session_id}-{suf}-{self.exit_order_seq:03d}"
 
 
 def _btc_side_and_contracts_for_realized(
@@ -518,12 +524,14 @@ def _compute_session_success(
     entry_fills: float,
     exit_fills: float,
 ) -> int:
-    """success = 1 only when we entered on exactly one leg AND the exit order filled."""
+    """success = 1 when exit sells fully cover the entry size (not just a partial exit)."""
     if not session.exit_handled:
         return 0
     if entry_fills <= 0:
         return 0
     if exit_fills <= 0:
+        return 0
+    if exit_fills + 1e-6 < float(entry_fills):
         return 0
     return 1
 
@@ -577,17 +585,26 @@ def _log_btc_session_row(
     entry_fills = max(yes_f, no_f)
 
     exit_f = 0.0
-    sell_oid = session.sell_yes_order_id or session.sell_no_order_id
-    if sell_oid:
-        try:
-            sell_o = _get_order(
-                client,
-                sell_oid,
-                ticker=ticker,
-            )
-            exit_f = _fp(sell_o.fill_count_fp)
-        except Exception:
-            LOG.debug("Trade log: could not read exit order %s", sell_oid)
+    if yes_f > 0 and no_f <= 0:
+        exit_f = _sum_exit_order_fills(client, session, ticker, "yes")
+    elif no_f > 0 and yes_f <= 0:
+        exit_f = _sum_exit_order_fills(client, session, ticker, "no")
+    else:
+        exit_f = _sum_exit_order_fills(client, session, ticker, "yes") + _sum_exit_order_fills(
+            client, session, ticker, "no"
+        )
+    if exit_f <= 0:
+        sell_oid = session.sell_yes_order_id or session.sell_no_order_id
+        if sell_oid:
+            try:
+                sell_o = _get_order(
+                    client,
+                    sell_oid,
+                    ticker=ticker,
+                )
+                exit_f = _fp(sell_o.fill_count_fp)
+            except Exception:
+                LOG.debug("Trade log: could not read exit order %s", sell_oid)
 
     success = _compute_session_success(session, entry_fills, exit_f)
     hour_utc = ended.astimezone(timezone.utc).hour
@@ -966,6 +983,125 @@ def _get_order(
     raise RuntimeError("get_order failed")
 
 
+def _order_status_str(o: Any) -> str:
+    st = getattr(o.status, "value", o.status)
+    if st is None:
+        return ""
+    return str(st).lower()
+
+
+def _sum_exit_order_fills(
+    client: KalshiClient,
+    session: Session,
+    ticker: str,
+    side: str,
+) -> float:
+    """Sum fill_count across exit orders for one side (supports multiple exits after partial cancels)."""
+    ids = session.exit_yes_order_ids if side == "yes" else session.exit_no_order_ids
+    total = 0.0
+    for oid in ids:
+        try:
+            o = _get_order(
+                client,
+                oid,
+                ticker=ticker,
+                client_order_id=None,
+                expected_side=side,
+            )
+            total += _fp(o.fill_count_fp)
+        except Exception:
+            LOG.debug("Sum exit fills: could not read order %s", oid)
+    return total
+
+
+def _retry_exit_if_partial_canceled(
+    client: KalshiClient,
+    session: Session,
+    ticker: str,
+    side: str,
+    order_id: str,
+    placed_count: int,
+    exit_cents: int,
+) -> None:
+    """If the active exit order is no longer resting and did not fully fill, place the remainder."""
+    if placed_count <= 0 or not order_id:
+        return
+    try:
+        o = _get_order(
+            client,
+            order_id,
+            ticker=ticker,
+            client_order_id=None,
+            expected_side=side,
+        )
+    except Exception as e:
+        LOG.warning("Exit monitor: could not fetch exit order %s: %s", order_id, e)
+        return
+
+    st = _order_status_str(o)
+    filled = _fp(o.fill_count_fp)
+
+    if st == "resting":
+        return
+
+    if filled + 1e-9 >= float(placed_count):
+        return
+
+    remaining = int(round(max(0.0, float(placed_count) - filled)))
+    if remaining <= 0:
+        return
+
+    if st not in ("canceled", "cancelled", "executed"):
+        LOG.warning(
+            "Exit monitor: order %s status=%s filled=%.4f/%d — not resubmitting (unexpected status)",
+            order_id,
+            st,
+            filled,
+            placed_count,
+        )
+        return
+
+    LOG.info(
+        "[TRADE] Exit order %s finished as %s with fill %.4f/%d — resubmitting SELL %s x%d @ %dc",
+        order_id,
+        st or "?",
+        filled,
+        placed_count,
+        side,
+        remaining,
+        exit_cents,
+    )
+    _place_sell(client, session, ticker, side, remaining, exit_cents)
+
+
+def _monitor_exit_partial_fills(
+    client: KalshiClient,
+    session: Session,
+    ticker: str,
+    exit_cents: int,
+) -> None:
+    if session.cached_yes_fills > 0 and session.sell_yes_order_id:
+        _retry_exit_if_partial_canceled(
+            client,
+            session,
+            ticker,
+            "yes",
+            session.sell_yes_order_id,
+            session.sell_yes_order_count,
+            exit_cents,
+        )
+    if session.cached_no_fills > 0 and session.sell_no_order_id:
+        _retry_exit_if_partial_canceled(
+            client,
+            session,
+            ticker,
+            "no",
+            session.sell_no_order_id,
+            session.sell_no_order_count,
+            exit_cents,
+        )
+
+
 def _cancel_if_resting(
     client: KalshiClient,
     order_id: Optional[str],
@@ -1000,7 +1136,7 @@ def _place_sell(
     count: int,
     exit_cents: int,
 ) -> None:
-    cid = session.cid_sell_yes() if side == "yes" else session.cid_sell_no()
+    cid = session.next_exit_client_order_id(side)
     kwargs: dict[str, Any] = {
         "ticker": ticker,
         "client_order_id": cid,
@@ -1024,8 +1160,12 @@ def _place_sell(
     oid = r.order.order_id
     if side == "yes":
         session.sell_yes_order_id = oid
+        session.sell_yes_order_count = count
+        session.exit_yes_order_ids.append(oid)
     else:
         session.sell_no_order_id = oid
+        session.sell_no_order_count = count
+        session.exit_no_order_ids.append(oid)
     LOG.info(
         "[TRADE] Exit order live | SELL %s order_id=%s @ %dc x%d",
         side,
@@ -1263,7 +1403,10 @@ def run_session(
                 pass
 
         if session.entries_submitted and session.yes_order_id and session.no_order_id:
-            _handle_fills(client, session, ticker, exit_cents)
+            if not session.exit_handled:
+                _handle_fills(client, session, ticker, exit_cents)
+            else:
+                _monitor_exit_partial_fills(client, session, ticker, exit_cents)
 
             if now > entry_end and not session.exit_handled:
                 _cancel_entry_only_if_flat(client, session, ticker)

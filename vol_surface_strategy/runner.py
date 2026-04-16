@@ -170,6 +170,78 @@ def _contracts_from_markets(markets: list[Any], kind: str) -> list[Any]:
     return out
 
 
+def _order_status_lower(o: Any) -> str:
+    raw = getattr(getattr(o, "status", None), "value", None) or getattr(o, "status", "") or ""
+    return str(raw).lower()
+
+
+def _sync_resting_order_tracker(
+    client: Any,
+    key: str,
+    row: Any,
+    st: str,
+) -> tuple[Any, str]:
+    """
+    If SQLite says ``order_resting`` but the exchange order is gone or terminal (canceled/expired),
+    clear resting state so the bot can post again. Scans can look fine while the tracker was stuck
+    forever in ``order_resting`` / ``order_unchanged`` without placing.
+    """
+    stn = normalize_tracker_status(st)
+    if stn != "order_resting" or not row or not row.order_id:
+        return row, stn
+
+    oid = str(row.order_id)
+    try:
+        o = fetch_order(client, oid)
+        ost = _order_status_lower(o)
+    except Exception as e:
+        LOG.warning(
+            "sync resting: get_order %s failed (%s); clearing stale order_resting state",
+            oid,
+            e,
+        )
+        update_status(
+            key,
+            "window_open",
+            order_id=None,
+            ticker=None,
+            side=None,
+            entry_cents=None,
+            contracts=None,
+            deployed_cents=0,
+        )
+        r2 = get_row(key)
+        return r2, "window_open" if r2 else "outside_window"
+
+    if ost == "executed":
+        update_status(key, "position_active")
+        r2 = get_row(key)
+        if r2:
+            _panel_upsert_open_trade(key, r2)
+        return r2, "position_active"
+
+    if ost in ("resting", "pending"):
+        return row, "order_resting"
+
+    LOG.info(
+        "sync resting: order %s terminal status=%s — resetting to window_open (can re-place)",
+        oid,
+        ost or "?",
+    )
+    update_status(
+        key,
+        "window_open",
+        order_id=None,
+        ticker=None,
+        side=None,
+        entry_cents=None,
+        contracts=None,
+        deployed_cents=0,
+    )
+    r2 = get_row(key)
+    return r2, "window_open" if r2 else "outside_window"
+
+
 def _monitor_log(
     market_id: str,
     state: str,
@@ -286,6 +358,9 @@ def _btc_monitor_cycle(client: Any, dry_run: bool, now_utc: datetime) -> None:
         upsert_pending(key, market_type="btc_hourly", hour_start_utc=hour_start.isoformat(), status="window_open")
         row = get_row(key)
         st = "window_open"
+
+    if st == "order_resting" and row and row.order_id:
+        row, st = _sync_resting_order_tracker(client, key, row, st)
 
     if st == "position_active":
         _monitor_log(mid, st, t_rem, "filled", ScanResultStub(), "no_change")
@@ -520,6 +595,9 @@ def _weather_monitor_cycle(
         )
         row = get_row(key)
         st = "window_open"
+
+    if st == "order_resting" and row and row.order_id:
+        row, st = _sync_resting_order_tracker(client, key, row, st)
 
     if st == "position_active":
         _monitor_log(mid, st, t_rem, "filled", ScanResultStub(), "no_change")

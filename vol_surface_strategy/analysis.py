@@ -1090,15 +1090,11 @@ def run_scan(
 
     n_contracts = contracts_to_buy(portfolio_cents, f_trade, entry)
     if n_contracts < 1:
-        return ScanResult(
-            False,
-            "abort",
-            "zero_contracts",
-            side=side,
-            entry_cents=entry,
-            f_trade=f_trade,
-            gate_log=gate_log,
-        )
+        n_contracts = 1
+        gate_log = gate_log + [
+            "sizing: Kelly implied <1 contract; using minimum 1 "
+            f"(portfolio={portfolio_cents}¢ f_trade={f_trade:.4f} entry={entry}¢)"
+        ]
 
     return ScanResult(
         True,
@@ -1120,4 +1116,5 @@ def run_scan(
         pair_debug=[{"i": p.i, "j": p.j, "sigma": p.sigma, "v": p.valid} for p in pairs],
         weather_market_type=weather_mt,
         from_range_buckets=from_range,
+        gate_log=gate_log,
     )

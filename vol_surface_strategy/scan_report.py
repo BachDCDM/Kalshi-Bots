@@ -56,7 +56,7 @@ _REASON_HINT: dict[str, str] = {
     "gate4_no_ask": "No valid NO price for entry",
     "gate4_yes_ask": "No valid YES price for entry",
     "kelly_nonpositive": "Kelly fraction non-positive",
-    "zero_contracts": "Rounded position size is zero",
+    "zero_contracts": "Legacy: sizing used to abort here; runner now uses minimum 1 contract",
     "market_classification": "Could not classify weather ladder / CDF failed",
     "incoherent_bucket_mids": "Marginal YES mids sum to >115% (stale/inconsistent book)",
 }
