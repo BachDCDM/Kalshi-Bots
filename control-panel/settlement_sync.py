@@ -23,10 +23,15 @@ Use ``settlement_prefixes`` on a strategy **before** these defaults (yaml order)
 out tickers for a different strategy id (e.g. a subset on the weather bot card only).
 
 Dedupe key: (ticker, settled_time_iso). New syncs INSERT OR REPLACE so late API updates apply.
+
+For ``strategy_id == vol_surface``, each synced settlement also attempts to **resolve** matching
+**open** rows in ``vol_surface_data/panel.db`` ``trade_outcomes`` (same ticker as the bot recorded),
+so the Trade outcomes table and CSV export include net P&amp;L at settlement.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -37,6 +42,8 @@ from typing import Any, Optional
 from kalshi_python_sync.api.portfolio_api import PortfolioApi
 
 from kalshi_readout import load_strategy_env_map, make_kalshi_client
+
+_LOG = logging.getLogger("kalshi.settlement_sync")
 
 
 def _dollars_str_to_cents(val: Any) -> int:
@@ -442,6 +449,30 @@ def sync_settlements_once(
                     )
                     total_rows += 1
                     by_strategy[sid] = by_strategy.get(sid, 0) + 1
+                    if sid == "vol_surface":
+                        try:
+                            from vol_surface_strategy.panel_state import (
+                                resolve_open_trades_for_kalshi_settlement,
+                            )
+
+                            n_to = resolve_open_trades_for_kalshi_settlement(
+                                ticker=ticker,
+                                net_pnl_cents=net_cents,
+                                resolved_utc=st_iso,
+                            )
+                            if n_to:
+                                _LOG.info(
+                                    "vol_surface panel.db trade_outcomes: resolved %s row(s) ticker=%s net_pnl_cents=%s",
+                                    n_to,
+                                    ticker,
+                                    net_cents,
+                                )
+                        except Exception:
+                            _LOG.debug(
+                                "vol_surface trade_outcomes resolve failed ticker=%s",
+                                ticker,
+                                exc_info=True,
+                            )
                 c.commit()
             cursor = getattr(resp, "cursor", None) or None
             if not cursor:

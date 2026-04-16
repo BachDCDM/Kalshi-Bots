@@ -234,6 +234,36 @@ def mark_trade_resolved(
         c.commit()
 
 
+def resolve_open_trades_for_kalshi_settlement(
+    *,
+    ticker: str,
+    net_pnl_cents: int,
+    resolved_utc: str,
+) -> int:
+    """
+    When the control panel syncs Kalshi settlements, mark any **open** vol-surface row
+    with this ``ticker`` as resolved using **net** P&amp;L (same basis as ``settlement_ledger``).
+
+    Returns the number of rows updated (normally 0 or 1).
+    """
+    if not ticker or not str(ticker).strip():
+        return 0
+    init_panel_db()
+    note = f"Kalshi settlement net_pnl_cents={int(net_pnl_cents)}"
+    with _conn() as c:
+        cur = c.execute(
+            """
+            UPDATE trade_outcomes
+            SET status = 'resolved', pnl_cents = ?, resolved_utc = ?, note = ?
+            WHERE ticker = ? AND status = 'open'
+            """,
+            (int(net_pnl_cents), resolved_utc, note, str(ticker).strip()),
+        )
+        n = int(cur.rowcount or 0)
+        c.commit()
+    return n
+
+
 def sum_realized_pnl_cents() -> int:
     init_panel_db()
     with _conn() as c:
