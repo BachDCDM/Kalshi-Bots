@@ -1,0 +1,17 @@
+# Install: cp to ~/.config/systemd/user/ then daemon-reload. Adjust %h/kalshi-trading if needed.
+
+[Unit]
+Description=Kalshi sports pre-game vol-surface strategy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kalshi-trading
+EnvironmentFile=-%h/kalshi-trading/.env
+ExecStart=%h/kalshi-trading/.venv/bin/python -m vol_surface_strategy.sports_main
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

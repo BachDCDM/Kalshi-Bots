@@ -11,7 +11,7 @@ BucketMode = Literal["unknown", "below", "above", "range"]
 import numpy as np
 from scipy import stats
 
-ModelKind = Literal["lognormal", "normal"]
+ModelKind = Literal["lognormal", "normal", "poisson", "negbinom"]
 
 
 def clamp_prob(p: float) -> float:
@@ -140,12 +140,148 @@ def fair_yes_normal(mu_star: float, k: float, sigma: float) -> float:
     return phi((mu_star - k) / sigma)
 
 
+def _exceed_cutoff(k_line: float) -> int:
+    """Half-point line (e.g. 4.5) → integer cutoff m with P(X > k_line) = P(X >= m)."""
+    return int(math.ceil(float(k_line) - 1e-9))
+
+
+def tail_prob_poisson(lam: float, k_line: float) -> float:
+    """P(X > k_line) for Poisson(lam), X integer; Kalshi 'over 4.5' → P(X >= 5)."""
+    if lam <= 0:
+        return 1.0
+    m = _exceed_cutoff(k_line)
+    if m <= 0:
+        return 1.0
+    return float(stats.poisson.sf(m - 1, lam))
+
+
+def tail_prob_nbinom(mu: float, r_disp: float, k_line: float) -> float:
+    """
+    Negative binomial as count with mean ``mu`` and scipy shape ``n=r_disp``,
+    ``p = n / (n + mu)`` so that mean = n(1-p)/p = mu.
+    """
+    if mu <= 0 or r_disp <= 0:
+        return 1.0
+    p = r_disp / (r_disp + mu)
+    m = _exceed_cutoff(k_line)
+    if m <= 0:
+        return 1.0
+    return float(stats.nbinom.sf(m - 1, r_disp, p))
+
+
+def _invert_poisson_lambda(k_line: float, p_target: float) -> Optional[float]:
+    """Bisection on λ for tail_prob_poisson(λ, k) ≈ p_target."""
+    lo, hi = 1e-4, 80.0
+    if tail_prob_poisson(lo, k_line) < p_target:
+        return None
+    if tail_prob_poisson(hi, k_line) > p_target:
+        return None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if tail_prob_poisson(mid, k_line) > p_target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _invert_nbinom_mu(k_line: float, p_target: float, r_disp: float) -> Optional[float]:
+    lo, hi = 0.15, 25.0
+    if tail_prob_nbinom(lo, r_disp, k_line) < p_target:
+        return None
+    if tail_prob_nbinom(hi, r_disp, k_line) > p_target:
+        return None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if tail_prob_nbinom(mid, r_disp, k_line) > p_target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def implied_rate_poisson_pair(ki: float, kj: float, pi: float, pj: float) -> Optional[float]:
+    """Implied λ from two ladder points (least-squares on grid, monotone ladder)."""
+    zi = z_from_prob(pi)
+    zj = z_from_prob(pj)
+    ok, _ = _pair_valid_prices(pi, pj, zi, zj, min_dz=0.05)
+    if not ok or kj <= ki:
+        return None
+    best: Optional[float] = None
+    best_e = float("inf")
+    for lam in np.linspace(0.08, 40.0, 120):
+        e = (tail_prob_poisson(lam, ki) - pi) ** 2 + (tail_prob_poisson(lam, kj) - pj) ** 2
+        if e < best_e:
+            best_e = e
+            best = float(lam)
+    if best is None or best_e > 0.015:
+        return None
+    return best
+
+
+def implied_mean_nbinom_pair(
+    ki: float, kj: float, pi: float, pj: float, r_disp: float
+) -> Optional[float]:
+    zi = z_from_prob(pi)
+    zj = z_from_prob(pj)
+    ok, _ = _pair_valid_prices(pi, pj, zi, zj, min_dz=0.05)
+    if not ok or kj <= ki:
+        return None
+    best: Optional[float] = None
+    best_e = float("inf")
+    for mu in np.linspace(0.4, 18.0, 140):
+        e = (tail_prob_nbinom(mu, r_disp, ki) - pi) ** 2 + (tail_prob_nbinom(mu, r_disp, kj) - pj) ** 2
+        if e < best_e:
+            best_e = e
+            best = float(mu)
+    if best is None or best_e > 0.02:
+        return None
+    return best
+
+
+def fair_yes_poisson(lam: float, k_line: float) -> float:
+    return clamp_prob(tail_prob_poisson(lam, k_line))
+
+
+def fair_yes_nbinom(mu: float, r_disp: float, k_line: float) -> float:
+    return clamp_prob(tail_prob_nbinom(mu, r_disp, k_line))
+
+
+def edge_stability_poisson(market_mid_yes: float, lam: float, k_out: float) -> bool:
+    def edge_at(l: float) -> float:
+        return market_mid_yes - fair_yes_poisson(l, k_out)
+
+    e0 = edge_at(lam)
+    if abs(e0) < 1e-12:
+        return True
+    for mult in (0.90, 1.10):
+        e = edge_at(lam * mult)
+        if (e > 0) != (e0 > 0):
+            return False
+    return True
+
+
+def edge_stability_nbinom(market_mid_yes: float, mu: float, r_disp: float, k_out: float) -> bool:
+    def edge_at(m: float) -> float:
+        return market_mid_yes - fair_yes_nbinom(m, r_disp, k_out)
+
+    e0 = edge_at(mu)
+    if abs(e0) < 1e-12:
+        return True
+    for mult in (0.90, 1.10):
+        e = edge_at(mu * mult)
+        if (e > 0) != (e0 > 0):
+            return False
+    return True
+
+
 def build_pair_matrix(
     contracts: list[ContractInput],
     model: ModelKind,
     t_years: float,
     *,
     adjacent_min_dz: Optional[float] = None,
+    nbinom_r_disp: float = 8.0,
 ) -> list[PairResult]:
     """
     contracts must be strike-sorted (as after _monotone_subset).
@@ -177,8 +313,14 @@ def build_pair_matrix(
                 continue
             if model == "lognormal":
                 sig = sigma_pair_lognormal(ki, kj, zi, zj, t_years)
-            else:
+            elif model == "normal":
                 sig = sigma_pair_normal(ki, kj, zi, zj)
+            elif model == "poisson":
+                sig = implied_rate_poisson_pair(ki, kj, pi, pj)
+            elif model == "negbinom":
+                sig = implied_mean_nbinom_pair(ki, kj, pi, pj, nbinom_r_disp)
+            else:
+                sig = None
             if sig is None:
                 out.append(PairResult(i, j, 0.0, False, "sigma_bounds"))
             else:
@@ -244,6 +386,8 @@ def consensus_underlying(
     model: ModelKind,
     sigma_star: float,
     t_years: float,
+    *,
+    nbinom_r_disp: float = 8.0,
 ) -> Optional[float]:
     estimates: list[float] = []
     for a, c in enumerate(contracts):
@@ -253,8 +397,16 @@ def consensus_underlying(
         z = z_from_prob(p)
         if model == "lognormal":
             estimates.append(implied_S_lognormal(c.strike, z, sigma_star, t_years))
-        else:
+        elif model == "normal":
             estimates.append(implied_mu_normal(c.strike, z, sigma_star))
+        elif model == "poisson":
+            lam = _invert_poisson_lambda(c.strike, p)
+            if lam is not None:
+                estimates.append(lam)
+        elif model == "negbinom":
+            mu = _invert_nbinom_mu(c.strike, p, nbinom_r_disp)
+            if mu is not None:
+                estimates.append(mu)
     if not estimates:
         return None
     return float(np.median(estimates))
@@ -263,7 +415,14 @@ def consensus_underlying(
 def plausibility_sigma(sigma_star: float, model: ModelKind) -> bool:
     if model == "lognormal":
         return 0.20 <= sigma_star <= 3.00
-    return 0.5 <= sigma_star <= 15.0
+    if model == "normal":
+        return 0.5 <= sigma_star <= 15.0
+    if model == "poisson":
+        # Pair matrix stores implied λ in ``sigma`` field for Poisson ladders.
+        return 0.15 <= sigma_star <= 35.0
+    if model == "negbinom":
+        return 0.5 <= sigma_star <= 18.0
+    return False
 
 
 def edge_stability(

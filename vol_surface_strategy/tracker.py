@@ -73,6 +73,16 @@ def btc_key(hour_start: datetime) -> str:
     return f"btc:{hs.isoformat()}"
 
 
+def sports_key(event_ticker: str, series_ticker: str, ladder_shard: str = "") -> str:
+    """One open vol-surface position per (event, series[, shard]) ladder — same spirit as one key per BTC hour."""
+    et = (event_ticker or "").strip()
+    st = (series_ticker or "").strip()
+    sh = (ladder_shard or "").strip()
+    if not sh:
+        return f"s:{et}:{st}"
+    return f"s:{et}:{st}#{sh}"
+
+
 def get_row(key: str) -> Optional[PositionRow]:
     init_db()
     with _conn() as c:

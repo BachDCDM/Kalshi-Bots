@@ -73,6 +73,8 @@ def _market_type_for_key(key: str) -> str:
         parts = key.split(":")
         if len(parts) >= 3:
             return "weather_high" if parts[2].upper() == "HIGH" else "weather_low"
+    if key.startswith("s:"):
+        return "sports_vol_surface"
     return "unknown"
 
 

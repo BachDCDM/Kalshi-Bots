@@ -358,12 +358,71 @@ function loadVolSurfaceDashboard(el, sid) {
     h += '<div class="overview-tile"><div class="hint">BTC hourly</div><div class="big">' + fmtCents(pnl.btc_hourly) + '</div></div>';
     h += '<div class="overview-tile"><div class="hint">Weather HIGH</div><div class="big">' + fmtCents(pnl.weather_high) + '</div></div>';
     h += '<div class="overview-tile"><div class="hint">Weather LOW</div><div class="big">' + fmtCents(pnl.weather_low) + '</div></div>';
+    h += '<div class="overview-tile"><div class="hint">Sports vol</div><div class="big">' + fmtCents((pnl.sports_vol_surface != null && pnl.sports_vol_surface !== undefined) ? pnl.sports_vol_surface : 0) + '</div></div>';
     h += '</div>';
     if (j.pnl_source === 'kalshi_settlement_ledger') {
       h += '<p class="hint" style="margin:0.5rem 0">Tile totals use the <strong>Kalshi settlement ledger</strong> (net P&amp;L: payout minus YES/NO cost basis and fees). Rows in <code>trade_outcomes</code> (panel.db) are updated to <strong>resolved</strong> with the same net P&amp;L when settlement sync matches an <strong>open</strong> position by ticker (CSV export includes these).</p>';
     } else {
       h += '<p class="hint" style="margin:0.5rem 0">Realized P&amp;L in <code>trade_outcomes</code> when settlement sync resolves an open position (ticker match). Open rows show until Kalshi settles.</p>';
     }
+    h += '<h3 style="font-size:0.95rem;margin:0.85rem 0 0.35rem">Sports — upcoming (48h on Kalshi)</h3>';
+    h += '<p class="hint" style="margin:0 0 0.5rem">Listed start uses Kalshi <code>rules_primary</code> / <code>occurrence_datetime</code> (not administrative expiration). <strong>Trading window</strong> opens <strong>3h</strong> before start and ends <strong>10m</strong> before start (pre-game only). Column <em>min to window</em> is minutes until that window opens (0 = open or past open).</p>';
+    if (j.sports_panel_error) {
+      h += '<p class="hint" style="color:#f5a623">Sports schedule fetch: ' + escapeHtml(String(j.sports_panel_error)) + '</p>';
+    }
+    const ssched = j.sports_schedule || [];
+    if (ssched.length === 0) {
+      h += '<p class="hint" style="margin:0 0 0.75rem">No upcoming games in the next 48h (or discovery empty).</p>';
+    } else {
+      h += '<div class="table-wrap" style="margin-bottom:1rem"><table style="font-size:0.82rem"><thead><tr>';
+      h += '<th>League</th><th>Event</th><th>Start (ET)</th><th>Min to window</th><th>Min to game</th><th>In window</th>';
+      h += '</tr></thead><tbody>';
+      for (const r of ssched) {
+        const inW = r.in_trading_window ? '<span style="color:var(--ok)">Yes</span>' : '<span style="color:var(--muted)">No</span>';
+        h += '<tr><td>' + escapeHtml(String(r.sport || '')) + '</td><td><code>' + escapeHtml(String(r.event_ticker || '')) + '</code></td>';
+        h += '<td>' + escapeHtml(utcToEst(r.game_start_et)) + '</td>';
+        h += '<td>' + (r.minutes_until_trading_window_opens != null ? escapeHtml(String(r.minutes_until_trading_window_opens)) : '—') + '</td>';
+        h += '<td>' + (r.minutes_until_game_start != null ? escapeHtml(String(r.minutes_until_game_start)) : '—') + '</td><td>' + inW + '</td></tr>';
+      }
+      h += '</tbody></table></div>';
+    }
+
+    h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Sports — tracked ladders (last scan &amp; orders)</h3>';
+    h += '<p class="hint" style="margin:0 0 0.5rem">Rows appear when the sports vol bot has touched a ladder key. While any game is <strong>in the pre-game window</strong>, the bot wakes every <strong>5 minutes</strong>; resting orders use the same ~<strong>4 min</strong> TTL pattern as BTC/weather.</p>';
+    const slad = j.sports_ladders || [];
+    if (slad.length === 0) {
+      h += '<p class="hint" style="margin:0 0 0.75rem">No sports tracker rows yet.</p>';
+    } else {
+      h += '<div class="table-wrap" style="margin-bottom:1rem"><table style="font-size:0.82rem"><thead><tr>';
+      h += '<th>Ladder</th><th>Window</th><th>In window</th><th>Last scan (ET)</th><th>Order</th><th>Tracker</th>';
+      h += '</tr></thead><tbody>';
+      for (const m of slad) {
+        const w = m.window || {};
+        const sc = m.last_scan || {};
+        const label = escapeHtml(m.label || m.key || '');
+        const inW = w.in_trading_window ? '<span style="color:var(--ok)">Yes</span>' : '<span style="color:var(--muted)">No</span>';
+        let scanCol = '—';
+        if (sc.updated_utc) {
+          scanCol = escapeHtml(utcToEst(sc.updated_utc));
+          if (sc.trade_recommended) {
+            scanCol += ' <span style="color:var(--ok)">trade</span> ' + escapeHtml(sc.outlier_ticker || '');
+          } else {
+            const rs = String(sc.reason || sc.action || '').slice(0, 72);
+            if (rs) scanCol += ' <span class="hint">' + escapeHtml(rs) + '</span>';
+          }
+        }
+        const ord = volSurfaceOrderStatusLabel(m.order_status);
+        const ordHtml = ord === 'None'
+          ? '<span style="color:var(--muted)">None</span>'
+          : (ord === 'Open order' ? '<span style="color:#8cb4ff">Open order</span>' : '<span style="color:var(--ok)">Active position</span>');
+        const trk = escapeHtml(m.status != null ? String(m.status) : (m.raw_status != null ? String(m.raw_status) : '—'));
+        h += '<tr title="' + escapeHtml(m.key || '') + '"><td><strong>' + label + '</strong></td>';
+        h += '<td>' + escapeHtml((w.window_hint || '').slice(0, 120)) + '</td><td>' + inW + '</td>';
+        h += '<td>' + scanCol + '</td><td>' + ordHtml + '</td><td><code>' + trk + '</code></td></tr>';
+      }
+      h += '</tbody></table></div>';
+    }
+
     h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">All markets</h3>';
     h += '<p class="hint" style="margin:0 0 0.5rem">Window = strategy trading hours. <strong>5m tick</strong> = this minute is an evaluation tick (:00,:05,…; BTC uses UTC). Last scan updates when the bot runs a full calc for that key. Order: <em>None</em> (no resting order / flat), <em>Open order</em> (limit working), <em>Active position</em> (filled / holding).</p>';
     const mktList = j.markets && j.markets.length ? j.markets : (j.tracker_rows || []);

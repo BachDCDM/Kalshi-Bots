@@ -13,6 +13,7 @@ from vol_surface_strategy.config import (
     RANGE_BUCKET_DERIVED_MID_MIN_CENTS,
     RANGE_BUCKET_RAW_MID_MAX_CENTS,
     RANGE_BUCKET_RAW_MID_MIN_CENTS,
+    SPORTS_GATE2_MIN_BOOK_SZ,
     TRADE_YES_MID_MAX_CENTS,
     TRADE_YES_MID_MIN_CENTS,
     WEATHER_GATE2_MIN_BOOK_SZ,
@@ -181,10 +182,14 @@ def _volume_contracts(c: Any) -> float:
         return 0.0
 
 
-def _passes_gate2_liquidity(contracts: list[Any], *, is_weather: bool = False) -> tuple[bool, float, float, float]:
+def _passes_gate2_liquidity(
+    contracts: list[Any], *, is_weather: bool = False, is_sports: bool = False
+) -> tuple[bool, float, float, float]:
     """
     Gate 2: pass if any liquidity proxy clears the bar. Crypto uses $5k / 5k contracts / 5k book;
     weather uses $1k thresholds — thin per-city ladders rarely hit 5k.
+    Sports (non-weather-gate path) uses **book size only** — pre-game markets often have
+    ``vol_fp=0`` for hours while YES bid/ask depth is real.
     """
     mid_vol = sum(_volume_dollars(c) for c in contracts)
     vol_c = sum(_volume_contracts(c) for c in contracts)
@@ -198,6 +203,9 @@ def _passes_gate2_liquidity(contracts: list[Any], *, is_weather: bool = False) -
             or vol_c >= WEATHER_GATE2_MIN_VOL_FP
             or book_c >= WEATHER_GATE2_MIN_BOOK_SZ
         ):
+            return True, mid_vol, vol_c, book_c
+    elif is_sports:
+        if book_c >= SPORTS_GATE2_MIN_BOOK_SZ:
             return True, mid_vol, vol_c, book_c
     elif mid_vol >= 5000 or vol_c >= 5000 or book_c >= 5000:
         return True, mid_vol, vol_c, book_c

@@ -165,23 +165,28 @@ def extract_strike_btc(m: Any) -> Optional[float]:
 
 
 def parse_weather_bucket_text(text: str) -> tuple[Optional[float], Optional[float], BucketMode]:
-    """Parse Kalshi-style bucket labels into (low, high, mode)."""
+    """Parse Kalshi-style bucket labels into (low, high, mode).
+
+    Numeric tokens allow decimals so the same parser works for sports props
+    (e.g. ``220.5 or above``) and weather (integer °F still matches).
+    """
     if not text:
         return None, None, "unknown"
     t = text.lower().replace("℉", "f").replace("°", "")
+    num = r"(\d+\.?\d*)"
     if "or below" in t or "or lower" in t:
-        m = re.search(r"(\d+)", t)
+        m = re.search(num, t)
         if m:
             hi = float(m.group(1))
             return None, hi, "below"
         return None, None, "unknown"
     if "or above" in t or "or higher" in t:
-        m = re.search(r"(\d+)", t)
+        m = re.search(num, t)
         if m:
             lo = float(m.group(1))
             return lo, None, "above"
         return None, None, "unknown"
-    m = re.search(r"(\d+)\s*f?\s*(?:to|-|–)\s*(\d+)\s*f?", t)
+    m = re.search(rf"{num}\s*f?\s*(?:to|-|–)\s*{num}\s*f?", t)
     if m:
         return float(m.group(1)), float(m.group(2)), "range"
     return None, None, "unknown"
@@ -221,7 +226,7 @@ def extract_strike_weather(m: Any) -> Optional[float]:
             pass
     # subtitle "72°F or above" etc.
     sub = str(getattr(m, "subtitle", "") or getattr(m, "yes_sub_title", "") or "")
-    m1 = re.search(r"(\d+)\s*°?\s*F", sub, re.I)
+    m1 = re.search(r"(\d+\.?\d*)\s*°?\s*F", sub, re.I)
     if m1:
         return float(m1.group(1))
     return None
@@ -275,27 +280,52 @@ def contract_from_market(m: Any, *, kind: str) -> Optional[ContractInput]:
             k = float(bl) + 0.001
         else:
             k = extract_strike_btc(m)
-    else:
-        # Prefer subtitle lines: full title often contains a year (e.g. 2026) that breaks digit regexes.
-        sub = str(getattr(m, "subtitle", "") or "").strip()
-        yss = str(getattr(m, "yes_sub_title", "") or "").strip()
-        title = str(getattr(m, "title", "") or "").strip()
-        blob_prio = " ".join(x for x in (sub, yss) if x)
-        blob_full = " ".join(x for x in (title, sub, yss) if x)
-        bl, bh, bm = parse_weather_bucket_text(blob_prio)
-        if bm == "unknown":
-            bl, bh, bm = parse_weather_bucket_text(blob_full)
-        k = extract_strike_weather(m)
-        if k is None and bm != "unknown":
-            if bm == "range" and bl is not None and bh is not None:
-                k = (bl + bh) / 2.0
-            elif bh is not None:
-                k = float(bh)
-            elif bl is not None:
-                k = float(bl)
+        if k is None:
+            return None
+        tick = str(getattr(m, "ticker", "") or "")
+        return ContractInput(
+            ticker=tick,
+            strike=float(k),
+            mid_cents=mid,
+            yes_bid_cents=float(yb),
+            yes_ask_cents=float(ya),
+            volume_fp=vol,
+            yes_bid_size_fp=ybsz,
+            yes_ask_size_fp=yasz,
+            bucket_low=bl,
+            bucket_high=bh,
+            bucket_mode=bm,
+            one_sided=one_sided,
+        )
+
+    if kind not in ("weather", "sports"):
+        raise ValueError(f"contract_from_market: unsupported kind {kind!r} (use weather|sports|btc)")
+
+    # Weather + sports: same YES/NO book inference; same subtitle / ``or above`` / range parsing as weather.
+    sub = str(getattr(m, "subtitle", "") or "").strip()
+    yss = str(getattr(m, "yes_sub_title", "") or "").strip()
+    title = str(getattr(m, "title", "") or "").strip()
+    blob_prio = " ".join(x for x in (sub, yss) if x)
+    blob_full = " ".join(x for x in (title, sub, yss) if x)
+    bl, bh, bm = parse_weather_bucket_text(blob_prio)
+    if bm == "unknown":
+        bl, bh, bm = parse_weather_bucket_text(blob_full)
+    k = extract_strike_weather(m)
+    if k is None and bm != "unknown":
+        if bm == "range" and bl is not None and bh is not None:
+            k = (bl + bh) / 2.0
+        elif bh is not None:
+            k = float(bh)
+        elif bl is not None:
+            k = float(bl)
+    if kind == "sports" and k is None:
+        k = extract_strike_sports(m)
     if k is None:
         return None
-    sk = weather_sort_strike(bl, bh, bm) if kind == "weather" else k
+    if bm != "unknown":
+        sk = weather_sort_strike(bl, bh, bm)
+    else:
+        sk = float(k)
     tick = str(getattr(m, "ticker", "") or "")
     return ContractInput(
         ticker=tick,
@@ -311,3 +341,35 @@ def contract_from_market(m: Any, *, kind: str) -> Optional[ContractInput]:
         bucket_mode=bm,
         one_sided=one_sided,
     )
+
+
+_SPORTS_STRIKE_NUM = re.compile(
+    r"(?:over|at least|more than|scores?|records?)\s*(\d+\.?\d*)",
+    re.I,
+)
+
+
+def extract_strike_sports(m: Any) -> Optional[float]:
+    """Strike / threshold line for sports props (Kalshi floor_strike or copy)."""
+    for attr in ("floor_strike", "cap_strike", "functional_strike"):
+        v = _mget(m, attr)
+        if v is not None and str(v) != "":
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    blob = " ".join(
+        str(_mget(m, x) or "") for x in ("subtitle", "yes_sub_title", "title")
+    )
+    ma = _SPORTS_STRIKE_NUM.search(blob)
+    if ma:
+        return float(ma.group(1))
+    m2 = re.search(r"(?:^|\s)(\d+\.\d+)(?:\s|\+|\?)", blob)
+    if m2:
+        return float(m2.group(1))
+    return None
+
+
+def contract_from_sports_market(m: Any) -> Optional[ContractInput]:
+    """Sports ladder row: same book + subtitle threshold parsing as weather, then sports regex fallback."""
+    return contract_from_market(m, kind="sports")

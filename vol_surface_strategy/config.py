@@ -38,6 +38,10 @@ WEATHER_GATE2_MIN_MID_VOL = 1000.0
 WEATHER_GATE2_MIN_VOL_FP = 1000.0
 # Thin tails often land just under 1k resting size; keep slightly below headline 1k.
 WEATHER_GATE2_MIN_BOOK_SZ = 800.0
+# Sports: ladders often have zero traded volume for hours while the book is live — gate on book only.
+SPORTS_GATE2_MIN_BOOK_SZ = 500.0
+# Monotone / LOO: exclude wide YES books (near-certain tails with unreliable mids).
+SPORTS_SURFACE_MAX_YES_SPREAD_CENTS = 8.0
 # Strike-adjacent contracts (consecutive in sorted c1) need wider Φ⁻¹ separation than farther pairs.
 RANGE_BUCKET_ADJACENT_MIN_DZ = 0.15
 

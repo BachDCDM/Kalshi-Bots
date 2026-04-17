@@ -35,6 +35,21 @@ strategies:
   # Optional: settlement_prefixes (uppercase ok) — first strategy match wins (yaml order).
   # KXHIGH/KXLOW/KXHIGHT default to vol_surface for ledger + dashboard; prefix a row here to
   # keep specific series on the weather strategy card instead.
+  # Sports pre-game vol surface (separate process from vol_surface main). Enable restart_on_pull in Deploy prefs if you want git-pull to restart it.
+  - id: sports_vol
+    title: "Sports vol (pre-game)"
+    systemd_unit: kalshi-sports-vol.service
+    settlement_prefixes: []
+    data:
+      type: mixed
+      journal_lines: 400
+      sqlite:
+        path: vol_surface_data/panel.db
+        tables:
+          - last_scan
+          - order_events
+          - trade_outcomes
+
   - id: vol_surface
     title: "Vol surface (BTC hourly + weather)"
     systemd_unit: kalshi-vol-surface.service

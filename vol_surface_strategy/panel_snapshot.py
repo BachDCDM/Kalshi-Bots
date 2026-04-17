@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from zoneinfo import ZoneInfo
 
 from vol_surface_strategy.config import CITIES
 from vol_surface_strategy.discovery import resolution_date_for_high_scan, resolution_date_for_low_scan
 from vol_surface_strategy.panel_state import PANEL_DB_PATH, init_panel_db, sum_pnl_by_market_type, sum_realized_pnl_cents
-from vol_surface_strategy.tracker import btc_key, get_row, weather_key
+from vol_surface_strategy.sports_model import SportCode, sport_from_series_ticker
+from vol_surface_strategy.tracker import btc_key, get_row, list_all_rows, weather_key
 from vol_surface_strategy.trading_windows import (
     btc_in_trading_window,
     btc_order_expiration_ts,
@@ -270,6 +271,141 @@ def _build_market_row(
     }
 
 
+def _parse_sports_tracker_key(key: str) -> tuple[str, str, str]:
+    """``s:{event_ticker}:{series_ticker}`` or ``…#{ladder_shard}``."""
+    if not key.startswith("s:"):
+        return "", "", ""
+    tail = key[2:]
+    idx = tail.find(":")
+    if idx < 0:
+        return "", "", ""
+    et = tail[:idx]
+    rest = tail[idx + 1 :]
+    if "#" in rest:
+        st, shard = rest.split("#", 1)
+    else:
+        st, shard = rest, ""
+    return et, st, shard
+
+
+def _try_sports_dashboard_data(now_utc: datetime) -> dict[str, Any]:
+    """
+    Kalshi-backed sports schedule + tracker ladders for the control panel (best-effort;
+    failures are non-fatal and returned in ``error``).
+    """
+    out: dict[str, Any] = {"schedule": [], "ladders": [], "error": None}
+    try:
+        from vol_surface_strategy.kalshi_io import load_client
+        from vol_surface_strategy.sports_discovery import (
+            iter_sports_game_targets,
+            parse_event_overrides_with_start,
+        )
+        from vol_surface_strategy.sports_windows import (
+            ET,
+            describe_sports_trading_window,
+            game_start_et_from_markets,
+            in_pre_game_order_window,
+            sports_trading_window_open_et,
+        )
+
+        client = load_client()
+        games = iter_sports_game_targets(client, scan_debug=False)
+        so = parse_event_overrides_with_start()
+        now_et = now_utc.astimezone(ET)
+        horizon = now_utc + timedelta(hours=48)
+
+        event_gs: dict[str, tuple[SportCode, datetime]] = {}
+        event_mk: dict[str, list[Any]] = {}
+        for et, sport, mk in games:
+            if not mk:
+                continue
+            event_mk[et] = mk
+            gs_et: Optional[datetime] = None
+            if et in so:
+                try:
+                    dt = datetime.fromisoformat(so[et].replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=ET)
+                    gs_et = dt.astimezone(ET)
+                except ValueError:
+                    pass
+            if gs_et is None:
+                gs_et = game_start_et_from_markets(mk, sport=sport, fallback_utc=None)
+            if gs_et is None:
+                continue
+            prev = event_gs.get(et)
+            if prev is None or gs_et < prev[1]:
+                event_gs[et] = (sport, gs_et)
+
+        sched: list[dict[str, Any]] = []
+        for et, (sport, gs_et) in sorted(
+            event_gs.items(), key=lambda kv: kv[1][1].astimezone(timezone.utc)
+        ):
+            gs_utc = gs_et.astimezone(timezone.utc)
+            if gs_utc <= now_utc or gs_utc > horizon:
+                continue
+            open_et, close_et = sports_trading_window_open_et(gs_et)
+            in_w, mins_to = in_pre_game_order_window(sport, now_et, gs_et)
+            mins_until_open = max(0.0, (open_et - now_et).total_seconds() / 60.0)
+            sched.append(
+                {
+                    "event_ticker": et,
+                    "sport": sport,
+                    "game_start_et": gs_et.isoformat(),
+                    "window_open_et": open_et.isoformat(),
+                    "window_close_et": close_et.isoformat(),
+                    "in_trading_window": in_w,
+                    "minutes_until_game_start": round(mins_to, 1),
+                    "minutes_until_trading_window_opens": round(mins_until_open, 1),
+                }
+            )
+        out["schedule"] = sched
+
+        ladders: list[dict[str, Any]] = []
+        for row in list_all_rows(120):
+            key = row.key or ""
+            if not (row.market_type == "sports_vol_surface" or key.startswith("s:")):
+                continue
+            et, st, shard = _parse_sports_tracker_key(key)
+            if not et:
+                continue
+            tpl = event_gs.get(et)
+            sport_eff: Optional[SportCode] = tpl[0] if tpl else sport_from_series_ticker(st)
+            if sport_eff is None:
+                continue
+            mk = event_mk.get(et) or []
+            gs_et = tpl[1] if tpl else (
+                game_start_et_from_markets(mk, sport=sport_eff, fallback_utc=None) if mk else None
+            )
+            win = describe_sports_trading_window(cast(SportCode, sport_eff), now_utc, gs_et)
+            scan = _read_last_scan_row(key)
+            st_norm = normalize_tracker_status(row.status)
+            ladders.append(
+                {
+                    "key": key,
+                    "label": f"{sport_eff} {et}" + (f" · {st}" if st else "") + (f" [{shard}]" if shard else ""),
+                    "event_ticker": et,
+                    "series_ticker": st,
+                    "ladder_shard": shard or None,
+                    "sport": sport_eff,
+                    "order_status": _order_status_from_tracker(row),
+                    "status": st_norm,
+                    "raw_status": row.status,
+                    "ticker": row.ticker,
+                    "side": row.side,
+                    "contracts": row.contracts,
+                    "entry_cents": row.entry_cents,
+                    "order_id": row.order_id,
+                    "window": win,
+                    "last_scan": _last_scan_summary(scan),
+                }
+            )
+        out["ladders"] = ladders
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
 def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
     """Full JSON for GET /api/strategies/vol-surface/dashboard."""
     now = datetime.now(timezone.utc)
@@ -277,6 +413,7 @@ def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
     markets_full = [_build_market_row(k, lab, dmt, now) for k, lab, dmt in specs]
 
     pnl_by = sum_pnl_by_market_type()
+    sports_extras = _try_sports_dashboard_data(now)
     return {
         "generated_at_utc": now.isoformat(),
         "cumulative_pnl_cents": sum_realized_pnl_cents(),
@@ -286,4 +423,7 @@ def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
         "recent_order_events": _read_recent_orders(100),
         "trade_outcomes": _read_trade_outcomes(120),
         "panel_db": str(PANEL_DB_PATH),
+        "sports_schedule": sports_extras.get("schedule") or [],
+        "sports_ladders": sports_extras.get("ladders") or [],
+        "sports_panel_error": sports_extras.get("error"),
     }

@@ -275,7 +275,12 @@ def sum_realized_pnl_cents() -> int:
 
 def sum_pnl_by_market_type() -> dict[str, int]:
     init_panel_db()
-    out: dict[str, int] = {"btc_hourly": 0, "weather_high": 0, "weather_low": 0}
+    out: dict[str, int] = {
+        "btc_hourly": 0,
+        "weather_high": 0,
+        "weather_low": 0,
+        "sports_vol_surface": 0,
+    }
     with _conn() as c:
         cur = c.execute(
             """
@@ -293,4 +298,6 @@ def sum_pnl_by_market_type() -> dict[str, int]:
                 out["weather_high"] = int(s or 0)
             elif key == "weather_low":
                 out["weather_low"] = int(s or 0)
+            elif key == "sports_vol_surface":
+                out["sports_vol_surface"] = int(s or 0)
     return out
