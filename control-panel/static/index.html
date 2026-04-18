@@ -470,12 +470,16 @@ function loadVolSurfaceDashboard(el, sid) {
     }
     h += '</tbody></table></div>';
     h += '<h3 style="font-size:0.95rem;margin:0.75rem 0 0.35rem">Trade outcomes</h3>';
-    h += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Ticker</th><th>Status</th><th>Contracts</th><th>Entry¢</th><th>P&amp;L¢</th><th>Note</th></tr></thead><tbody>';
+    h += '<p class="hint" style="margin:0 0 0.5rem">Resolved rows get P&amp;L from settlement sync; <strong>Settled</strong> is Kalshi <code>market_result</code> (yes/no/void, etc.).</p>';
+    h += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Ticker</th><th>Status</th><th>Contracts</th><th>Entry¢</th><th>P&amp;L¢</th><th>Settled</th><th>Note</th></tr></thead><tbody>';
     for (const t of (j.trade_outcomes || []).slice(0, 40)) {
+      const settled = (t.settlement_market_result != null && String(t.settlement_market_result).trim() !== '')
+        ? escapeHtml(String(t.settlement_market_result))
+        : '—';
       h += '<tr><td><code>' + escapeHtml(t.market_key || '') + '</code></td><td>' + escapeHtml(t.ticker || '') + '</td>';
       h += '<td>' + escapeHtml(t.status || '') + '</td><td>' + (t.contracts != null ? t.contracts : '') + '</td>';
       h += '<td>' + (t.entry_cents != null ? t.entry_cents : '') + '</td><td>' + (t.pnl_cents != null ? t.pnl_cents : '—') + '</td>';
-      h += '<td>' + escapeHtml(t.note || '') + '</td></tr>';
+      h += '<td>' + settled + '</td><td>' + escapeHtml(t.note || '') + '</td></tr>';
     }
     h += '</tbody></table></div>';
     if (j.panel_db) {

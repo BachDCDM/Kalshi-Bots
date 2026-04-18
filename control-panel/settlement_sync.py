@@ -24,9 +24,13 @@ out tickers for a different strategy id (e.g. a subset on the weather bot card o
 
 Dedupe key: (ticker, settled_time_iso). New syncs INSERT OR REPLACE so late API updates apply.
 
-For ``strategy_id == vol_surface``, each synced settlement also attempts to **resolve** matching
-**open** rows in ``vol_surface_data/panel.db`` ``trade_outcomes`` (same ticker as the bot recorded),
-so the Trade outcomes table and CSV export include net P&amp;L at settlement.
+For ``strategy_id`` in ``vol_surface`` or ``sports_vol``, each synced settlement also attempts to
+**resolve** matching **open** rows in ``vol_surface_data/panel.db`` ``trade_outcomes`` (same ticker
+as the bot recorded), so the Trade outcomes table and CSV export include net P&amp;L and Kalshi
+``market_result`` at settlement.
+
+Multivariate game ladders (``KXMVENBAGAME`` / NHL / MLB / MLS / NFL, etc.) classify as
+``sports_vol`` so they are not dropped as ``unassigned``.
 """
 
 from __future__ import annotations
@@ -44,6 +48,26 @@ from kalshi_python_sync.api.portfolio_api import PortfolioApi
 from kalshi_readout import load_strategy_env_map, make_kalshi_client
 
 _LOG = logging.getLogger("kalshi.settlement_sync")
+
+# Kalshi multivariate *game* market tickers (prefix match). Keep aligned with
+# ``vol_surface_strategy.sports_discovery.autoscan_multivariate_series_tickers`` (+ NFL).
+_DEFAULT_SPORTS_VOL_SETTLEMENT_PREFIXES: tuple[str, ...] = (
+    "KXMVENBAGAME",
+    "KXMVENHLGAME",
+    "KXMVEMLBGAME",
+    "KXMVEMLSGAME",
+    "KXMVENFLGAME",
+    "KXMVENWNBAGAME",
+)
+
+
+def _sports_vol_settlement_sid(ticker_upper: str) -> Optional[str]:
+    """Return ``sports_vol`` if ``ticker`` is a multivariate game-ladder settlement Kalshi shape."""
+    u = ticker_upper.strip().upper()
+    for p in _DEFAULT_SPORTS_VOL_SETTLEMENT_PREFIXES:
+        if u.startswith(p):
+            return "sports_vol"
+    return None
 
 
 def _dollars_str_to_cents(val: Any) -> int:
@@ -262,6 +286,9 @@ def classify_settlement_ticker(ticker: str, strategies: list[dict[str, Any]]) ->
     for pref in ("KXHIGH", "KXLOW", "KXHIGHT"):
         if u.startswith(pref):
             return "vol_surface"
+    sid_sp = _sports_vol_settlement_sid(u)
+    if sid_sp:
+        return sid_sp
     return "unassigned"
 
 
@@ -289,13 +316,18 @@ def get_ledger_pnl_by_strategy(repo: Path) -> dict[str, int]:
 
 def vol_surface_ledger_pnl_breakdown(repo: Path) -> dict[str, Any]:
     """
-    Split vol_surface strategy settlements into btc_hourly vs weather HIGH vs weather LOW
-    (same buckets as the vol dashboard tiles). Uses net_pnl when available.
+    Split settlements attributed to ``vol_surface`` or ``sports_vol`` into dashboard tiles:
+    btc_hourly, weather HIGH/LOW, sports_vol_surface. Uses net_pnl when available.
     """
     init_ledger_db(repo)
     if not ledger_db_path(repo).is_file():
         return {"has_ledger": False}
-    out = {"btc_hourly": 0, "weather_high": 0, "weather_low": 0}
+    out: dict[str, int] = {
+        "btc_hourly": 0,
+        "weather_high": 0,
+        "weather_low": 0,
+        "sports_vol_surface": 0,
+    }
     total = 0
     n = 0
     try:
@@ -303,17 +335,21 @@ def vol_surface_ledger_pnl_breakdown(repo: Path) -> dict[str, Any]:
             cur = c.execute(
                 """
                 SELECT ticker,
-                       COALESCE(net_pnl_cents, 0) AS amt
+                       COALESCE(net_pnl_cents, 0) AS amt,
+                       strategy_id
                 FROM kalshi_settlements
-                WHERE strategy_id = 'vol_surface'
+                WHERE strategy_id IN ('vol_surface', 'sports_vol')
                 """
             )
             for row in cur.fetchall():
                 t = str(row[0] or "").strip().upper()
                 amt = int(row[1] or 0)
+                sid = str(row[2] or "").strip()
                 total += amt
                 n += 1
-                if t.startswith("KXBTC-"):
+                if sid == "sports_vol" or _sports_vol_settlement_sid(t):
+                    out["sports_vol_surface"] += amt
+                elif t.startswith("KXBTC-"):
                     out["btc_hourly"] += amt
                 elif t.startswith("KXLOW"):
                     out["weather_low"] += amt
@@ -449,7 +485,7 @@ def sync_settlements_once(
                     )
                     total_rows += 1
                     by_strategy[sid] = by_strategy.get(sid, 0) + 1
-                    if sid == "vol_surface":
+                    if sid in ("vol_surface", "sports_vol"):
                         try:
                             from vol_surface_strategy.panel_state import (
                                 resolve_open_trades_for_kalshi_settlement,
@@ -459,17 +495,20 @@ def sync_settlements_once(
                                 ticker=ticker,
                                 net_pnl_cents=net_cents,
                                 resolved_utc=st_iso,
+                                market_result=mres or None,
                             )
                             if n_to:
                                 _LOG.info(
-                                    "vol_surface panel.db trade_outcomes: resolved %s row(s) ticker=%s net_pnl_cents=%s",
+                                    "panel.db trade_outcomes: resolved %s row(s) strategy_id=%s ticker=%s net_pnl_cents=%s",
                                     n_to,
+                                    sid,
                                     ticker,
                                     net_cents,
                                 )
                         except Exception:
                             _LOG.debug(
-                                "vol_surface trade_outcomes resolve failed ticker=%s",
+                                "trade_outcomes resolve failed strategy_id=%s ticker=%s",
+                                sid,
                                 ticker,
                                 exc_info=True,
                             )

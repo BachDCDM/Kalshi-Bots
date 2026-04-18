@@ -39,6 +39,8 @@ strategies:
   - id: sports_vol
     title: "Sports vol (pre-game)"
     systemd_unit: kalshi-sports-vol.service
+    # Optional override; defaults also classify KXMVENBAGAME / NHL / MLB / MLS / NFL multivariate
+    # game tickers to sports_vol in control-panel/settlement_sync.py
     settlement_prefixes: []
     data:
       type: mixed

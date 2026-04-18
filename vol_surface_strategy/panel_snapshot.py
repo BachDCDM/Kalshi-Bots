@@ -159,6 +159,19 @@ def _read_recent_orders(limit: int = 80) -> list[dict[str, Any]]:
         return []
 
 
+def _kalshi_settlement_result_from_note(note: Any) -> Optional[str]:
+    """Parse ``market_result=`` from ``trade_outcomes.note`` (written at Kalshi settlement sync)."""
+    if not note or not isinstance(note, str):
+        return None
+    key = "market_result="
+    if key not in note:
+        return None
+    fragment = note.split(key, 1)[1].strip()
+    if ";" in fragment:
+        fragment = fragment.split(";", 1)[0].strip()
+    return fragment or None
+
+
 def _read_trade_outcomes(limit: int = 100) -> list[dict[str, Any]]:
     init_panel_db()
     import sqlite3
@@ -172,7 +185,14 @@ def _read_trade_outcomes(limit: int = 100) -> list[dict[str, Any]]:
             cur = conn.execute(
                 f"SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT {max(1, min(300, limit))}"
             )
-            return [{k: r[k] for k in r.keys()} for r in cur.fetchall()]
+            out: list[dict[str, Any]] = []
+            for r in cur.fetchall():
+                d = {k: r[k] for k in r.keys()}
+                res = _kalshi_settlement_result_from_note(d.get("note"))
+                if res is not None:
+                    d["settlement_market_result"] = res
+                out.append(d)
+            return out
         finally:
             conn.close()
     except sqlite3.Error:

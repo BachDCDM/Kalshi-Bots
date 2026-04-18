@@ -239,25 +239,32 @@ def resolve_open_trades_for_kalshi_settlement(
     ticker: str,
     net_pnl_cents: int,
     resolved_utc: str,
+    market_result: Optional[str] = None,
 ) -> int:
     """
-    When the control panel syncs Kalshi settlements, mark any **open** vol-surface row
-    with this ``ticker`` as resolved using **net** P&amp;L (same basis as ``settlement_ledger``).
+    When the control panel syncs Kalshi settlements, mark any **open** row with this
+    ``ticker`` (case-insensitive match) as resolved using **net** P&amp;L (same basis as
+    ``settlement_ledger``). Optional ``market_result`` is Kalshi's resolution outcome (e.g. yes/no).
 
     Returns the number of rows updated (normally 0 or 1).
     """
     if not ticker or not str(ticker).strip():
         return 0
     init_panel_db()
-    note = f"Kalshi settlement net_pnl_cents={int(net_pnl_cents)}"
+    parts = [f"Kalshi settlement net_pnl_cents={int(net_pnl_cents)}"]
+    mr = (market_result or "").strip()
+    if mr:
+        parts.append(f"market_result={mr}")
+    note = "; ".join(parts)
+    tu = str(ticker).strip()
     with _conn() as c:
         cur = c.execute(
             """
             UPDATE trade_outcomes
             SET status = 'resolved', pnl_cents = ?, resolved_utc = ?, note = ?
-            WHERE ticker = ? AND status = 'open'
+            WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(?)) AND status = 'open'
             """,
-            (int(net_pnl_cents), resolved_utc, note, str(ticker).strip()),
+            (int(net_pnl_cents), resolved_utc, note, tu),
         )
         n = int(cur.rowcount or 0)
         c.commit()
