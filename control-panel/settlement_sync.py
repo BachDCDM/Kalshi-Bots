@@ -51,6 +51,7 @@ _LOG = logging.getLogger("kalshi.settlement_sync")
 
 # Kalshi multivariate *game* market tickers (prefix match). Keep aligned with
 # ``vol_surface_strategy.sports_discovery.autoscan_multivariate_series_tickers`` (+ NFL).
+# Catalog / non-MV series often use ``KXMLBGAME``, ``KXNBAGAME``, etc. (see VOL_SPORTS_EVENTS docs).
 _DEFAULT_SPORTS_VOL_SETTLEMENT_PREFIXES: tuple[str, ...] = (
     "KXMVENBAGAME",
     "KXMVENHLGAME",
@@ -58,16 +59,36 @@ _DEFAULT_SPORTS_VOL_SETTLEMENT_PREFIXES: tuple[str, ...] = (
     "KXMVEMLSGAME",
     "KXMVENFLGAME",
     "KXMVENWNBAGAME",
+    "KXMLBGAME",
+    "KXMLBSPREAD",
+    "KXMLSGAME",
+    "KXNBAGAME",
+    "KXNHLGAME",
+    "KXMVESOCCERGAME",
 )
 
 
 def _sports_vol_settlement_sid(ticker_upper: str) -> Optional[str]:
-    """Return ``sports_vol`` if ``ticker`` is a multivariate game-ladder settlement Kalshi shape."""
+    """Return ``sports_vol`` if ``ticker`` looks like a pro-sports game / ladder settlement."""
     u = ticker_upper.strip().upper()
     for p in _DEFAULT_SPORTS_VOL_SETTLEMENT_PREFIXES:
         if u.startswith(p):
             return "sports_vol"
-    return None
+    head = u.split("-", 1)[0] if "-" in u else u
+    try:
+        from vol_surface_strategy.sports_model import sport_from_series_ticker
+    except ImportError:
+        sport_from_series_ticker = None  # type: ignore[assignment]
+    if not sport_from_series_ticker:
+        return None
+    sp = sport_from_series_ticker(head)
+    if sp not in ("NBA", "NHL", "MLB", "MLS", "NFL"):
+        return None
+    if not head.startswith("KX"):
+        return None
+    if not any(k in u for k in ("GAME", "SPREAD", "TOTAL", "MARGIN")):
+        return None
+    return "sports_vol"
 
 
 def _dollars_str_to_cents(val: Any) -> int:
@@ -496,6 +517,7 @@ def sync_settlements_once(
                                 net_pnl_cents=net_cents,
                                 resolved_utc=st_iso,
                                 market_result=mres or None,
+                                event_ticker=ev or None,
                             )
                             if n_to:
                                 _LOG.info(

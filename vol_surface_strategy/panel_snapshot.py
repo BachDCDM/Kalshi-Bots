@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional, cast
 
 from zoneinfo import ZoneInfo
@@ -29,6 +30,8 @@ from vol_surface_strategy.trading_windows import (
     WEATHER_HIGH_WINDOWS,
     WEATHER_LOW_WINDOW,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _parse_key_parts(key: str) -> tuple[str, Optional[str], Optional[str]]:
@@ -157,6 +160,57 @@ def _read_recent_orders(limit: int = 80) -> list[dict[str, Any]]:
             conn.close()
     except sqlite3.Error:
         return []
+
+
+def _ledger_db_path(repo_root: Any) -> Path:
+    base = Path(repo_root).resolve() if repo_root is not None else _REPO_ROOT
+    return (base / "control-panel" / "data" / "settlement_ledger.db").resolve()
+
+
+def _enrich_trade_outcomes_with_settlement_ledger(
+    rows: list[dict[str, Any]], *, repo_root: Any = None
+) -> list[dict[str, Any]]:
+    """
+    Attach latest ``kalshi_settlements`` row per ticker so sports rows show net P&amp;L / outcome
+    even when ``trade_outcomes`` was not updated (ticker mismatch or sync order).
+    """
+    ledger_p = _ledger_db_path(repo_root)
+    if not ledger_p.is_file():
+        return rows
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(str(ledger_p), timeout=10)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return rows
+    try:
+        for d in rows:
+            if str(d.get("market_type") or "") != "sports_vol_surface":
+                continue
+            tk = str(d.get("ticker") or "").strip()
+            if not tk:
+                continue
+            r = conn.execute(
+                """
+                SELECT net_pnl_cents, revenue_cents, market_result, settled_time_iso, strategy_id
+                FROM kalshi_settlements
+                WHERE UPPER(TRIM(ticker)) = UPPER(TRIM(?))
+                ORDER BY settled_time_iso DESC
+                LIMIT 1
+                """,
+                (tk,),
+            ).fetchone()
+            if not r:
+                continue
+            d["ledger_net_pnl_cents"] = r["net_pnl_cents"]
+            d["ledger_revenue_cents"] = r["revenue_cents"]
+            d["ledger_market_result"] = r["market_result"]
+            d["ledger_settled_time_iso"] = r["settled_time_iso"]
+            d["ledger_strategy_id"] = r["strategy_id"]
+    finally:
+        conn.close()
+    return rows
 
 
 def _kalshi_settlement_result_from_note(note: Any) -> Optional[str]:
@@ -434,6 +488,8 @@ def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
 
     pnl_by = sum_pnl_by_market_type()
     sports_extras = _try_sports_dashboard_data(now)
+    trade_rows = _read_trade_outcomes(120)
+    trade_rows = _enrich_trade_outcomes_with_settlement_ledger(trade_rows, repo_root=repo_root)
     return {
         "generated_at_utc": now.isoformat(),
         "cumulative_pnl_cents": sum_realized_pnl_cents(),
@@ -441,7 +497,7 @@ def build_dashboard_payload(repo_root: Any = None) -> dict[str, Any]:
         "markets": markets_full,
         "tracker_rows": markets_full,
         "recent_order_events": _read_recent_orders(100),
-        "trade_outcomes": _read_trade_outcomes(120),
+        "trade_outcomes": trade_rows,
         "panel_db": str(PANEL_DB_PATH),
         "sports_schedule": sports_extras.get("schedule") or [],
         "sports_ladders": sports_extras.get("ladders") or [],

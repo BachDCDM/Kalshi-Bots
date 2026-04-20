@@ -234,17 +234,61 @@ def mark_trade_resolved(
         c.commit()
 
 
+def _resolve_sports_vol_single_open_by_event(
+    c: sqlite3.Connection,
+    *,
+    event_ticker: str,
+    net_pnl_cents: int,
+    resolved_utc: str,
+    note: str,
+    settlement_ticker: str,
+) -> int:
+    """
+    If exactly one open ``sports_vol_surface`` row exists for this Kalshi ``event_ticker``,
+    resolve it. Used when settlement ``ticker`` does not match the bot's stored ticker string.
+    """
+    et = (event_ticker or "").strip()
+    if not et:
+        return 0
+    like_pat = f"s:{et}:%"
+    r = c.execute(
+        """
+        SELECT id FROM trade_outcomes
+        WHERE status = 'open' AND market_type = 'sports_vol_surface' AND market_key LIKE ?
+        """,
+        (like_pat,),
+    ).fetchall()
+    if len(r) != 1:
+        return 0
+    row_id = int(r[0]["id"])
+    note2 = f"{note}; matched_open_by_event=1 settlement_ticker={settlement_ticker}"
+    cur = c.execute(
+        """
+        UPDATE trade_outcomes
+        SET status = 'resolved', pnl_cents = ?, resolved_utc = ?, note = ?
+        WHERE id = ? AND status = 'open'
+        """,
+        (int(net_pnl_cents), resolved_utc, note2, row_id),
+    )
+    return int(cur.rowcount or 0)
+
+
 def resolve_open_trades_for_kalshi_settlement(
     *,
     ticker: str,
     net_pnl_cents: int,
     resolved_utc: str,
     market_result: Optional[str] = None,
+    event_ticker: Optional[str] = None,
 ) -> int:
     """
     When the control panel syncs Kalshi settlements, mark any **open** row with this
     ``ticker`` (case-insensitive match) as resolved using **net** P&amp;L (same basis as
     ``settlement_ledger``). Optional ``market_result`` is Kalshi's resolution outcome (e.g. yes/no).
+
+    If no row matches by ticker but ``event_ticker`` is set and there is exactly **one** open
+    ``sports_vol_surface`` row for that event (same ``market_key`` prefix ``s:{event}:``), resolve
+    that row (covers rare ticker string mismatches vs the settlements API).
 
     Returns the number of rows updated (normally 0 or 1).
     """
@@ -267,6 +311,15 @@ def resolve_open_trades_for_kalshi_settlement(
             (int(net_pnl_cents), resolved_utc, note, tu),
         )
         n = int(cur.rowcount or 0)
+        if n == 0 and event_ticker and str(event_ticker).strip():
+            n = _resolve_sports_vol_single_open_by_event(
+                c,
+                event_ticker=str(event_ticker).strip(),
+                net_pnl_cents=int(net_pnl_cents),
+                resolved_utc=resolved_utc,
+                note=note,
+                settlement_ticker=tu,
+            )
         c.commit()
     return n
 

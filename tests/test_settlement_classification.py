@@ -23,6 +23,22 @@ def test_sports_multivariate_nhl_classifies_sports_vol() -> None:
     assert classify_settlement_ticker("KXMVENHLGAME-FOO", strategies) == "sports_vol"
 
 
+def test_catalog_mlb_game_prefix_classifies_sports_vol() -> None:
+    strategies: list[dict] = []
+    assert classify_settlement_ticker("KXMLBGAME-26APR18NYYBOS-SOMESTRIKE", strategies) == "sports_vol"
+
+
+def test_non_game_series_stays_unassigned() -> None:
+    strategies: list[dict] = []
+    assert classify_settlement_ticker("KXNBADRAFT-26-ROUND1", strategies) == "unassigned"
+
+
+def test_head_fallback_mlb_shape_classifies_sports_vol() -> None:
+    """Series head maps to a league via ``sport_from_series_ticker`` + ``GAME`` in full ticker."""
+    strategies: list[dict] = []
+    assert classify_settlement_ticker("KXMLBCUSTOM-26APR18-GAME", strategies) == "sports_vol"
+
+
 def test_vol_surface_weather_unchanged() -> None:
     strategies: list[dict] = []
     assert classify_settlement_ticker("KXHIGHNY-25APR01-T72", strategies) == "vol_surface"
